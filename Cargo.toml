@@ -2,6 +2,14 @@
 name = "runner_q"
 version = "0.1.0"
 edition = "2021"
+authors = ["Akinlua Bolamigbe bolamigbeakinlua@gmail.com"]
+description = "Redis-based activity queue and worker system"
+license = "MIT"
+repository = "https://github.com/alob-mtc/runnerq"
+homepage = "https://github.com/alob-mtc/runnerq"
+readme = "README.md"
+keywords = ["queue", "redis", "worker", "async", "background-jobs"]
+categories = ["asynchronous", "database", "concurrency"]
 
 [dependencies]
 async-trait = "0.1.89"
