@@ -1,6 +1,4 @@
-use crate::activity::activity::{
-    ActivityFuture, ActivityHandlerRegistry, ActivityOption, ActivityType,
-};
+use crate::activity::activity::{ActivityFuture, ActivityHandlerRegistry, ActivityOption};
 use crate::config::WorkerConfig;
 use crate::queue::queue::ActivityQueueTrait;
 use crate::runner::error::WorkerError;
@@ -96,6 +94,7 @@ impl WorkerEngine {
         let running = self.running.clone();
         let activity_queue = self.activity_queue.clone();
         let activity_handlers = self.activity_handlers.clone();
+        let activity_queue_for_context = self.activity_queue.clone();
 
         tokio::spawn(async move {
             debug!(%worker_id, "Starting worker loop");
@@ -149,6 +148,9 @@ impl WorkerEngine {
                     activity_type: activity_type.clone(),
                     retry_count: activity.retry_count,
                     metadata: activity.metadata.clone(),
+                    worker_engine: Arc::new(WorkerEngineWrapper {
+                        activity_queue: activity_queue_for_context.clone(),
+                    }),
                 };
 
                 // Execute activity with timeout
@@ -258,9 +260,9 @@ impl WorkerEngine {
 }
 
 impl WorkerEngine {
-    pub async fn execute_activity<T: ActivityType>(
+    pub async fn execute_activity(
         &self,
-        activity_type: T,
+        activity_type: String,
         payload: serde_json::Value,
         option: Option<ActivityOption>,
     ) -> Result<ActivityFuture, WorkerError> {
@@ -272,12 +274,40 @@ impl WorkerEngine {
             activity_id,
         ))
     }
-    pub fn register_activity<T: ActivityType>(
-        &mut self,
-        activity_type: T,
-        activity: Arc<dyn ActivityHandler>,
-    ) {
-        self.activity_handlers
-            .insert(activity_type.as_string(), activity);
+    pub fn register_activity(&mut self, activity_type: String, activity: Arc<dyn ActivityHandler>) {
+        self.activity_handlers.insert(activity_type, activity);
+    }
+}
+
+#[async_trait::async_trait]
+pub trait ActivityExecutor: Send + Sync {
+    async fn execute_activity(
+        &self,
+        activity_type: String,
+        payload: serde_json::Value,
+        option: Option<ActivityOption>,
+    ) -> Result<ActivityFuture, WorkerError>;
+}
+
+#[derive(Clone)]
+pub struct WorkerEngineWrapper {
+    activity_queue: Arc<dyn ActivityQueueTrait>,
+}
+
+#[async_trait::async_trait]
+impl ActivityExecutor for WorkerEngineWrapper {
+    async fn execute_activity(
+        &self,
+        activity_type: String,
+        payload: serde_json::Value,
+        option: Option<ActivityOption>,
+    ) -> Result<ActivityFuture, WorkerError> {
+        let activity = Activity::new(activity_type, payload, option);
+        let activity_id = activity.id;
+        self.activity_queue.enqueue(activity).await?;
+        Ok(ActivityFuture::new(
+            self.activity_queue.clone(),
+            activity_id,
+        ))
     }
 }

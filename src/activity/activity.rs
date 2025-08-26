@@ -1,17 +1,11 @@
 use async_trait::async_trait;
 
 use crate::queue::queue::ActivityQueueTrait;
+use crate::runner::runner::ActivityExecutor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
-
-/// Trait for activity types that can be stringified
-pub trait ActivityType: std::fmt::Display + Clone + Send + Sync + 'static {
-    fn as_string(&self) -> String {
-        self.to_string()
-    }
-}
 
 /// Activity priority levels
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -63,8 +57,8 @@ pub(crate) struct Activity {
 }
 
 impl Activity {
-    pub fn new<T: ActivityType>(
-        activity_type: T,
+    pub fn new(
+        activity_type: String,
         payload: serde_json::Value,
         option: Option<ActivityOption>,
     ) -> Self {
@@ -80,7 +74,7 @@ impl Activity {
 
         Self {
             id: Uuid::new_v4(),
-            activity_type: activity_type.as_string(),
+            activity_type,
             payload,
             priority,
             status: ActivityStatus::Pending,
@@ -102,6 +96,7 @@ pub struct ActivityContext {
     pub activity_type: String,
     pub retry_count: u32,
     pub metadata: HashMap<String, String>,
+    pub worker_engine: Arc<dyn ActivityExecutor>,
 }
 
 /// Result of Activity execution

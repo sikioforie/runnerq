@@ -25,28 +25,11 @@ runner_q = "0.1.0"
 ## Quick Start
 
 ```rust
-use runner_q::{ActivityQueue, WorkerEngine, ActivityPriority, ActivityType, ActivityOption};
+use runner_q::{ActivityQueue, WorkerEngine, ActivityPriority, ActivityOption};
 use runner_q::{ActivityHandler, ActivityContext, ActivityResult};
 use runner_q::config::WorkerConfig;
 use std::sync::Arc;
 use async_trait::async_trait;
-use serde::{Serialize, Deserialize};
-
-// Define activity types
-#[derive(Debug, Clone)]
-enum MyActivityType {
-    SendEmail,
-    ProcessPayment,
-}
-
-impl std::fmt::Display for MyActivityType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MyActivityType::SendEmail => write!(f, "send_email"),
-            MyActivityType::ProcessPayment => write!(f, "process_payment"),
-        }
-    }
-}
 
 // Implement activity handler
 pub struct SendEmailActivity;
@@ -65,7 +48,7 @@ impl ActivityHandler for SendEmailActivity {
     }
 
     fn activity_type(&self) -> String {
-        MyActivityType::SendEmail.to_string()
+        "send_email".to_string()
     }
 }
 
@@ -82,11 +65,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Register activity handler
     let send_email_activity = SendEmailActivity;
-    worker_engine.register_activity(MyActivityType::SendEmail, Arc::new(send_email_activity));
+    worker_engine.register_activity("send_email".to_string(), Arc::new(send_email_activity));
 
     // Execute an activity with custom options
     let future = worker_engine.execute_activity(
-        MyActivityType::SendEmail,
+        "send_email".to_string(),
         serde_json::json!({"to": "user@example.com", "subject": "Welcome!"}),
         Some(ActivityOption {
             priority: Some(ActivityPriority::High),
@@ -97,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Execute an activity with default options
     let future2 = worker_engine.execute_activity(
-        MyActivityType::SendEmail,
+        "send_email".to_string(),
         serde_json::json!({"to": "admin@example.com"}),
         None // Uses default priority (Normal), 3 retries, 300s timeout
     ).await?;
@@ -118,51 +101,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Activity Types
 
-Activity types in Runner-Q are defined using the `ActivityType` trait. Any type that implements `Display + Clone + Send + Sync + 'static` automatically implements this trait.
+Activity types in Runner-Q are simple strings that identify different types of activities. You can use any string as an activity type identifier.
 
-### Defining Activity Types
-
-You can define custom activity types using enums:
+### Examples
 
 ```rust
-#[derive(Debug, Clone)]
-enum MyActivityType {
-    SendEmail,
-    ProcessPayment,
-    ProvisionCard,
-    UpdateCardStatus,
-    ProcessWebhookEvent,
-}
+// Common activity types
+"send_email"
+"process_payment"
+"provision_card"
+"update_card_status"
+"process_webhook_event"
 
-impl std::fmt::Display for MyActivityType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MyActivityType::SendEmail => write!(f, "send_email"),
-            MyActivityType::ProcessPayment => write!(f, "process_payment"),
-            MyActivityType::ProvisionCard => write!(f, "provision_card"),
-            MyActivityType::UpdateCardStatus => write!(f, "update_card_status"),
-            MyActivityType::ProcessWebhookEvent => write!(f, "process_webhook_event"),
-        }
-    }
-}
-```
-
-### String-based Activity Types
-
-You can also use simple string wrappers:
-
-```rust
-#[derive(Debug, Clone)]
-struct StringActivityType(String);
-
-impl std::fmt::Display for StringActivityType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-// Usage
-let activity_type = StringActivityType("custom_activity".to_string());
+// You can use any string format you prefer
+"user.registration"
+"email-notification"
+"background_sync"
 ```
 
 ## Configuration
@@ -182,24 +136,9 @@ let config = WorkerConfig {
 You can create custom activity handlers by implementing the `ActivityHandler` trait:
 
 ```rust
-use runner_q::{ActivityContext, ActivityHandler, ActivityResult, ActivityType};
+use runner_q::{ActivityContext, ActivityHandler, ActivityResult};
 use async_trait::async_trait;
 use serde_json::Value;
-
-#[derive(Debug, Clone)]
-enum MyActivityType {
-    SendEmail,
-    ProcessPayment,
-}
-
-impl std::fmt::Display for MyActivityType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MyActivityType::SendEmail => write!(f, "send_email"),
-            MyActivityType::ProcessPayment => write!(f, "process_payment"),
-        }
-    }
-}
 
 pub struct PaymentActivity {
     // Add your dependencies here (database connections, external APIs, etc.)
@@ -230,12 +169,12 @@ impl ActivityHandler for PaymentActivity {
     }
 
     fn activity_type(&self) -> String {
-        MyActivityType::ProcessPayment.to_string()
+        "process_payment".to_string()
     }
 }
 
 // Register the handler
-worker_engine.register_activity(MyActivityType::ProcessPayment, Arc::new(PaymentActivity {}));
+worker_engine.register_activity("process_payment".to_string(), Arc::new(PaymentActivity {}));
 ```
 
 ## Activity Priority and Options
@@ -247,7 +186,7 @@ use runner_q::{ActivityPriority, ActivityOption};
 
 // High priority with custom retry and timeout settings
 let future = worker_engine.execute_activity(
-    MyActivityType::SendEmail,
+    "send_email".to_string(),
     serde_json::json!({"to": "user@example.com"}),
     Some(ActivityOption {
         priority: Some(ActivityPriority::Critical), // Highest priority
@@ -258,7 +197,7 @@ let future = worker_engine.execute_activity(
 
 // Use default options (Normal priority, 3 retries, 300s timeout)
 let future = worker_engine.execute_activity(
-    MyActivityType::SendEmail,
+    "send_email".to_string(),
     serde_json::json!({"to": "user@example.com"}),
     None
 ).await?;
@@ -284,7 +223,7 @@ struct EmailResult {
 }
 
 let future = worker_engine.execute_activity(
-    MyActivityType::SendEmail,
+    "send_email".to_string(),
     serde_json::json!({"to": "user@example.com"}),
     None
 ).await?;
@@ -294,6 +233,65 @@ let result_value = future.get_result().await?;
 let email_result: EmailResult = serde_json::from_value(result_value)?;
 println!("Email result: {:?}", email_result);
 ```
+
+## Nested Activities (Activity Orchestration)
+
+Activities can execute other activities using the `ActivityExecutor` available in the `ActivityContext`. This enables powerful workflow orchestration:
+
+```rust
+use runner_q::{ActivityExecutor, ActivityOption};
+
+#[async_trait]
+impl ActivityHandler for ProcessOrderActivity {
+    async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityResult {
+        let order: OrderData = serde_json::from_value(payload)?;
+        
+        // Execute sub-activities using the context's worker engine
+        
+        // 1. Update inventory
+        let inventory_future = context.worker_engine.execute_activity(
+            "update_inventory".to_string(),
+            serde_json::json!({"item": "product_123", "quantity": -1}),
+            Some(ActivityOption {
+                priority: Some(ActivityPriority::High),
+                max_retries: 3,
+                timeout_seconds: 60,
+            })
+        ).await?;
+        
+        // 2. Send confirmation email
+        let email_future = context.worker_engine.execute_activity(
+            "send_email".to_string(),
+            serde_json::json!({"to": order.customer_email, "template": "order_confirmation"}),
+            None
+        ).await?;
+        
+        // 3. Log the transaction
+        context.worker_engine.execute_activity(
+            "log_transaction".to_string(),
+            serde_json::json!({"order_id": order.id, "status": "processed"}),
+            None
+        ).await?;
+        
+        ActivityResult::Success(Some(serde_json::json!({
+            "order_id": order.id,
+            "status": "completed"
+        })))
+    }
+    
+    fn activity_type(&self) -> String {
+        "process_order".to_string()
+    }
+}
+```
+
+### Benefits of Nested Activities
+
+- **Modularity**: Break complex workflows into smaller, reusable activities
+- **Reliability**: Each sub-activity has its own retry logic and error handling
+- **Monitoring**: Track progress of individual workflow steps
+- **Scalability**: Sub-activities can be processed by different workers
+- **Flexibility**: Different priority levels and timeouts for different steps
 
 ## Error Handling
 
@@ -330,7 +328,7 @@ impl ActivityHandler for MyActivity {
 ```rust
 use runner_q::WorkerError;
 
-match worker_engine.execute_activity(activity_type, payload, options).await {
+match worker_engine.execute_activity(activity_type.to_string(), payload, options).await {
     Ok(future) => {
         // Activity was successfully enqueued
         match future.get_result().await {

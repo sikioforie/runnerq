@@ -83,7 +83,7 @@
 //!
 //!     // Execute an activity with custom options
 //!     let future = worker_engine.execute_activity(
-//!         MyActivityType::SendEmail,
+//!         MyActivityType::SendEmail.as_string(),
 //!         serde_json::json!({"to": "user@example.com", "subject": "Welcome!"}),
 //!         Some(ActivityOption {
 //!             priority: Some(ActivityPriority::High),
@@ -94,7 +94,7 @@
 //!
 //!     // Execute an activity with default options
 //!     let future2 = worker_engine.execute_activity(
-//!         MyActivityType::SendEmail,
+//!         MyActivityType::SendEmail.as_string(),
 //!         serde_json::json!({"to": "admin@example.com"}),
 //!         None // Uses default priority (Normal), 3 retries, 300s timeout
 //!     ).await?;
@@ -124,8 +124,8 @@ pub mod worker;
 pub use crate::config::WorkerConfig;
 pub use crate::queue::queue::{ActivityQueue, QueueStats};
 pub use crate::runner::error::WorkerError;
-pub use crate::runner::runner::WorkerEngine;
+pub use crate::runner::runner::{ActivityExecutor, WorkerEngine};
 pub use activity::activity::{
     ActivityContext, ActivityFuture, ActivityHandler, ActivityOption, ActivityPriority,
-    ActivityResult, ActivityStatus, ActivityType,
+    ActivityResult, ActivityStatus,
 };
