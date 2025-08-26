@@ -7,6 +7,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+// Import error handling types
+use super::error::{ActivityError, RetryableError};
+
 /// Activity priority levels
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ActivityPriority {
@@ -105,6 +108,66 @@ pub enum ActivityResult {
     Success(Option<serde_json::Value>),
     Retry(String),
     NonRetry(String),
+}
+
+impl ActivityResult {
+    /// Create a retry result with a message
+    pub fn retry<S: Into<String>>(msg: S) -> Self {
+        ActivityResult::Retry(msg.into())
+    }
+
+    /// Create a non-retry result with a message
+    pub fn non_retry<S: Into<String>>(msg: S) -> Self {
+        ActivityResult::NonRetry(msg.into())
+    }
+
+    /// Create a success result with optional data
+    pub fn success<T: Into<serde_json::Value>>(data: Option<T>) -> Self {
+        ActivityResult::Success(data.map(|d| d.into()))
+    }
+
+    /// Convert a Result to ActivityResult
+    pub fn from_result<T, E>(result: Result<T, E>) -> Self
+    where
+        T: Into<serde_json::Value>,
+        E: std::fmt::Display + RetryableError,
+    {
+        result.into()
+    }
+}
+
+/// Convert from Result<T, ActivityError> to ActivityResult
+impl<T> From<Result<T, ActivityError>> for ActivityResult
+where
+    T: Into<serde_json::Value>,
+{
+    fn from(result: Result<T, ActivityError>) -> Self {
+        match result {
+            Ok(value) => ActivityResult::Success(Some(value.into())),
+            Err(ActivityError::Retry(msg)) => ActivityResult::Retry(msg),
+            Err(ActivityError::NonRetry(msg)) => ActivityResult::NonRetry(msg),
+        }
+    }
+}
+
+/// Convert from Result<T, E> to ActivityResult where E implements RetryableError
+impl<T, E> From<Result<T, E>> for ActivityResult
+where
+    T: Into<serde_json::Value>,
+    E: std::fmt::Display + RetryableError,
+{
+    fn from(result: Result<T, E>) -> Self {
+        match result {
+            Ok(value) => ActivityResult::Success(Some(value.into())),
+            Err(err) => {
+                if err.is_retryable() {
+                    ActivityResult::Retry(err.to_string())
+                } else {
+                    ActivityResult::NonRetry(err.to_string())
+                }
+            }
+        }
+    }
 }
 
 /// Trait that all Activity handlers must implement

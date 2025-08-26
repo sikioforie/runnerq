@@ -10,7 +10,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use runner_q::{ActivityQueue, WorkerEngine, ActivityPriority, ActivityType, ActivityOption};
+//! use runner_q::{ActivityQueue, WorkerEngine, ActivityPriority, ActivityOption};
 //! use runner_q::{ActivityHandler, ActivityContext, ActivityResult};
 //! use runner_q::config::WorkerConfig;
 //! use std::sync::Arc;
@@ -24,7 +24,6 @@
 //!     ProcessPayment,
 //! }
 //!
-//! impl ActivityType for MyActivityType {}
 //!
 //! impl std::fmt::Display for MyActivityType {
 //!     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -79,11 +78,11 @@
 //!
 //!     // Register activity handler
 //!     let send_email_activity = SendEmailActivity;
-//!     worker_engine.register_activity(MyActivityType::SendEmail, Arc::new(send_email_activity));
+//!     worker_engine.register_activity(MyActivityType::SendEmail.to_string(), Arc::new(send_email_activity));
 //!
 //!     // Execute an activity with custom options
 //!     let future = worker_engine.execute_activity(
-//!         MyActivityType::SendEmail.as_string(),
+//!         MyActivityType::SendEmail.to_string(),
 //!         serde_json::json!({"to": "user@example.com", "subject": "Welcome!"}),
 //!         Some(ActivityOption {
 //!             priority: Some(ActivityPriority::High),
@@ -94,7 +93,7 @@
 //!
 //!     // Execute an activity with default options
 //!     let future2 = worker_engine.execute_activity(
-//!         MyActivityType::SendEmail.as_string(),
+//!         MyActivityType::SendEmail.to_string(),
 //!         serde_json::json!({"to": "admin@example.com"}),
 //!         None // Uses default priority (Normal), 3 retries, 300s timeout
 //!     ).await?;
@@ -129,3 +128,4 @@ pub use activity::activity::{
     ActivityContext, ActivityFuture, ActivityHandler, ActivityOption, ActivityPriority,
     ActivityResult, ActivityStatus,
 };
+pub use activity::error::{ActivityError, RetryableError};
