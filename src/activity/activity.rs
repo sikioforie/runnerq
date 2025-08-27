@@ -40,6 +40,7 @@ pub struct ActivityOption {
     pub priority: Option<ActivityPriority>,
     pub max_retries: u32,
     pub timeout_seconds: u64,
+    pub scheduled_at: Option<u64>,
 }
 
 /// Represents an Activity to be processed
@@ -65,14 +66,15 @@ impl Activity {
         payload: serde_json::Value,
         option: Option<ActivityOption>,
     ) -> Self {
-        let (priority, max_retries, timeout_seconds) = if let Some(opt) = option {
+        let (priority, max_retries, timeout_seconds, scheduled_at) = if let Some(opt) = option {
             (
                 opt.priority.unwrap_or(ActivityPriority::default()),
                 opt.max_retries,
                 opt.timeout_seconds,
+                opt.scheduled_at,
             )
         } else {
-            (ActivityPriority::default(), 3, 300)
+            (ActivityPriority::default(), 3, 300, None)
         };
 
         Self {
@@ -82,7 +84,10 @@ impl Activity {
             priority,
             status: ActivityStatus::Pending,
             created_at: chrono::Utc::now(),
-            scheduled_at: None,
+            scheduled_at: scheduled_at.map(|timestamp| {
+                chrono::DateTime::from_timestamp(timestamp as i64, 0)
+                    .unwrap_or_else(|| chrono::Utc::now())
+            }),
             retry_count: 0,
             max_retries,
             timeout_seconds,
@@ -102,78 +107,14 @@ pub struct ActivityContext {
     pub worker_engine: Arc<dyn ActivityExecutor>,
 }
 
-/// Result of Activity execution
-#[derive(Debug)]
-pub enum ActivityResult {
-    Success(Option<serde_json::Value>),
-    Retry(String),
-    NonRetry(String),
-}
 
-impl ActivityResult {
-    /// Create a retry result with a message
-    pub fn retry<S: Into<String>>(msg: S) -> Self {
-        ActivityResult::Retry(msg.into())
-    }
-
-    /// Create a non-retry result with a message
-    pub fn non_retry<S: Into<String>>(msg: S) -> Self {
-        ActivityResult::NonRetry(msg.into())
-    }
-
-    /// Create a success result with optional data
-    pub fn success<T: Into<serde_json::Value>>(data: Option<T>) -> Self {
-        ActivityResult::Success(data.map(|d| d.into()))
-    }
-
-    /// Convert a Result to ActivityResult
-    pub fn from_result<T, E>(result: Result<T, E>) -> Self
-    where
-        T: Into<serde_json::Value>,
-        E: std::fmt::Display + RetryableError,
-    {
-        result.into()
-    }
-}
-
-/// Convert from Result<T, ActivityError> to ActivityResult
-impl<T> From<Result<T, ActivityError>> for ActivityResult
-where
-    T: Into<serde_json::Value>,
-{
-    fn from(result: Result<T, ActivityError>) -> Self {
-        match result {
-            Ok(value) => ActivityResult::Success(Some(value.into())),
-            Err(ActivityError::Retry(msg)) => ActivityResult::Retry(msg),
-            Err(ActivityError::NonRetry(msg)) => ActivityResult::NonRetry(msg),
-        }
-    }
-}
-
-/// Convert from Result<T, E> to ActivityResult where E implements RetryableError
-impl<T, E> From<Result<T, E>> for ActivityResult
-where
-    T: Into<serde_json::Value>,
-    E: std::fmt::Display + RetryableError,
-{
-    fn from(result: Result<T, E>) -> Self {
-        match result {
-            Ok(value) => ActivityResult::Success(Some(value.into())),
-            Err(err) => {
-                if err.is_retryable() {
-                    ActivityResult::Retry(err.to_string())
-                } else {
-                    ActivityResult::NonRetry(err.to_string())
-                }
-            }
-        }
-    }
-}
+///A convenient Result type alias for use in activity handlers that want to use ? operator
+pub type ActivityHandlerResult<T = Option<serde_json::Value>> = Result<T, ActivityError>;
 
 /// Trait that all Activity handlers must implement
 #[async_trait]
 pub trait ActivityHandler: Send + Sync {
-    async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityResult;
+    async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityHandlerResult;
 
     fn activity_type(&self) -> String;
 }

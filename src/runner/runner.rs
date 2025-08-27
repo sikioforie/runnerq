@@ -2,9 +2,7 @@ use crate::activity::activity::{ActivityFuture, ActivityHandlerRegistry, Activit
 use crate::config::WorkerConfig;
 use crate::queue::queue::ActivityQueueTrait;
 use crate::runner::error::WorkerError;
-use crate::{
-    activity::activity::Activity, ActivityContext, ActivityHandler, ActivityQueue, ActivityResult,
-};
+use crate::{activity::activity::Activity, ActivityContext, ActivityError, ActivityHandler, ActivityHandlerResult, ActivityQueue};
 use bb8_redis::bb8::Pool;
 use bb8_redis::RedisConnectionManager;
 use std::sync::Arc;
@@ -164,29 +162,33 @@ impl WorkerEngine {
 
                 match result {
                     Ok(activity_result) => match activity_result {
-                        ActivityResult::Success(result) => {
-                            if let Err(e) = activity_queue.mark_completed(activity.id).await {
-                                error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as completed");
-                            }
-                            info!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "Activity completed successfully");
-                            if let Some(data) = result {
-                                // Store the result in the result queue
-                                if let Err(e) = activity_queue.store_result(activity.id, data).await
-                                {
-                                    error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to store activity result");
+                        Ok(value) => {
+
+                                if let Err(e) = activity_queue.mark_completed(activity.id).await {
+                                    error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as completed");
+                                }
+                                info!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "Activity completed successfully");
+                                if let Some(data) = value {
+                                    // Store the result in the result queue
+                                    if let Err(e) = activity_queue.store_result(activity.id, data).await
+                                    {
+                                        error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to store activity result");
+                                    }
+                                }
+
+                        }
+                        Err(e) => match e {
+                            ActivityError::Retry(reason) => {
+                                warn!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity requesting retry");
+                                if let Err(e) = activity_queue.mark_failed(activity, reason).await {
+                                    error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity for retry");
                                 }
                             }
-                        }
-                        ActivityResult::Retry(reason) => {
-                            warn!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity requesting retry");
-                            if let Err(e) = activity_queue.mark_failed(activity, reason).await {
-                                error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity for retry");
-                            }
-                        }
-                        ActivityResult::NonRetry(reason) => {
-                            error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity failed");
-                            if let Err(e) = activity_queue.mark_failed(activity, reason).await {
-                                error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
+                            ActivityError::NonRetry(reason) => {
+                                error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity failed");
+                                if let Err(e) = activity_queue.mark_failed(activity, reason).await {
+                                    error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
+                                }
                             }
                         }
                     },
