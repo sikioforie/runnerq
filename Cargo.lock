@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "runner_q"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "bb8-redis",

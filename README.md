@@ -19,7 +19,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-runner_q = "0.1.0"
+runner_q = "0.3.0"
 ```
 
 ## Quick Start
