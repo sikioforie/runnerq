@@ -17,7 +17,7 @@
 //!
 //! ```rust,no_run
 //! use runner_q::{ActivityQueue, WorkerEngine, ActivityPriority, ActivityOption};
-//! use runner_q::{ActivityHandler, ActivityContext, ActivityResult};
+//! use runner_q::{ActivityHandler, ActivityContext, ActivityHandlerResult, ActivityError};
 //! use runner_q::config::WorkerConfig;
 //! use std::sync::Arc;
 //! use async_trait::async_trait;
@@ -29,7 +29,6 @@
 //!     SendEmail,
 //!     ProcessPayment,
 //! }
-//!
 //!
 //! impl std::fmt::Display for MyActivityType {
 //!     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -45,16 +44,22 @@
 //!
 //! #[async_trait]
 //! impl ActivityHandler for SendEmailActivity {
-//!     async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityResult {
-//!         // Parse the email data
-//!         let email_data: serde_json::Value = payload;
-//!         let to = email_data["to"].as_str().unwrap_or("unknown");
+//!     async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityHandlerResult {
+//!         // Parse the email data - use ? operator for clean error handling
+//!         let email_data: serde_json::Map<String, serde_json::Value> = payload
+//!             .as_object()
+//!             .ok_or_else(|| ActivityError::NonRetry("Invalid payload format".to_string()))?
+//!             .clone();
+//!         
+//!         let to = email_data.get("to")
+//!             .and_then(|v| v.as_str())
+//!             .ok_or_else(|| ActivityError::NonRetry("Missing 'to' field".to_string()))?;
 //!         
 //!         // Simulate sending email
 //!         println!("Sending email to: {}", to);
 //!         
-//!         // Return success with result
-//!         ActivityResult::Success(Some(serde_json::json!({
+//!         // Return success with result data
+//!         Ok(Some(serde_json::json!({
 //!             "message": format!("Email sent to {}", to),
 //!             "status": "delivered"
 //!         })))
@@ -147,7 +152,7 @@
 //! # let worker_engine: WorkerEngine = todo!();
 //! // Schedule an activity for 30 minutes from now
 //! let scheduled_time = (Utc::now() + Duration::minutes(30)).timestamp() as u64;
-//! 
+//!
 //! let future = worker_engine.execute_activity(
 //!     "send_reminder".to_string(),
 //!     serde_json::json!({"user_id": 123, "message": "Don't forget your appointment!"}),
@@ -182,22 +187,24 @@
 //!
 //! ## Activity Orchestration
 //!
-//! Activities can execute other activities using the `ActivityExecutor` available in the 
+//! Activities can execute other activities using the `ActivityExecutor` available in the
 //! `ActivityContext`. This enables building complex workflows and activity orchestration patterns.
 //!
 //! ```rust,no_run
-//! use runner_q::{ActivityHandler, ActivityContext, ActivityResult, ActivityOption, ActivityPriority};
+//! use runner_q::{ActivityHandler, ActivityContext, ActivityHandlerResult, ActivityOption, ActivityPriority, ActivityError};
 //! use async_trait::async_trait;
-//! 
+//!
 //! pub struct OrderProcessingActivity;
 //!
 //! #[async_trait]
 //! impl ActivityHandler for OrderProcessingActivity {
-//!     async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityResult {
-//!         let order_id = payload["order_id"].as_str().unwrap_or("unknown");
+//!     async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityHandlerResult {
+//!         let order_id = payload["order_id"]
+//!             .as_str()
+//!             .ok_or_else(|| ActivityError::NonRetry("Missing order_id".to_string()))?;
 //!         
 //!         // Step 1: Validate payment
-//!         let payment_future = context.worker_engine.execute_activity(
+//!         let _payment_future = context.worker_engine.execute_activity(
 //!             "validate_payment".to_string(),
 //!             serde_json::json!({"order_id": order_id}),
 //!             Some(ActivityOption {
@@ -206,14 +213,14 @@
 //!                 timeout_seconds: 120,
 //!                 scheduled_at: None,
 //!             })
-//!         ).await.map_err(|e| format!("Failed to enqueue payment validation: {}", e))?;
+//!         ).await.map_err(|e| ActivityError::Retry(format!("Failed to enqueue payment validation: {}", e)))?;
 //!         
 //!         // Step 2: Update inventory
-//!         let inventory_future = context.worker_engine.execute_activity(
+//!         let _inventory_future = context.worker_engine.execute_activity(
 //!             "update_inventory".to_string(),
 //!             serde_json::json!({"order_id": order_id}),
 //!             None
-//!         ).await.map_err(|e| format!("Failed to enqueue inventory update: {}", e))?;
+//!         ).await.map_err(|e| ActivityError::Retry(format!("Failed to enqueue inventory update: {}", e)))?;
 //!         
 //!         // Step 3: Schedule delivery notification for later
 //!         let notification_time = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as u64;
@@ -226,9 +233,9 @@
 //!                 timeout_seconds: 300,
 //!                 scheduled_at: Some(notification_time),
 //!             })
-//!         ).await.map_err(|e| format!("Failed to schedule notification: {}", e))?;
+//!         ).await.map_err(|e| ActivityError::Retry(format!("Failed to schedule notification: {}", e)))?;
 //!         
-//!         ActivityResult::Success(Some(serde_json::json!({
+//!         Ok(Some(serde_json::json!({
 //!             "order_id": order_id,
 //!             "status": "processing",
 //!             "steps_initiated": ["payment_validation", "inventory_update", "delivery_notification"]
@@ -253,7 +260,7 @@ pub use crate::queue::queue::{ActivityQueue, QueueStats};
 pub use crate::runner::error::WorkerError;
 pub use crate::runner::runner::{ActivityExecutor, WorkerEngine};
 pub use activity::activity::{
-    ActivityContext, ActivityFuture, ActivityHandler, ActivityHandlerResult, ActivityOption, 
+    ActivityContext, ActivityFuture, ActivityHandler, ActivityHandlerResult, ActivityOption,
     ActivityPriority, ActivityStatus,
 };
 pub use activity::error::{ActivityError, RetryableError};

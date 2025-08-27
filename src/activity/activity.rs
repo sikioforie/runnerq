@@ -8,7 +8,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 // Import error handling types
-use super::error::{ActivityError, RetryableError};
+use super::error::ActivityError;
 
 /// Activity priority levels
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -107,14 +107,17 @@ pub struct ActivityContext {
     pub worker_engine: Arc<dyn ActivityExecutor>,
 }
 
-
 ///A convenient Result type alias for use in activity handlers that want to use ? operator
 pub type ActivityHandlerResult<T = Option<serde_json::Value>> = Result<T, ActivityError>;
 
 /// Trait that all Activity handlers must implement
 #[async_trait]
 pub trait ActivityHandler: Send + Sync {
-    async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityHandlerResult;
+    async fn handle(
+        &self,
+        payload: serde_json::Value,
+        context: ActivityContext,
+    ) -> ActivityHandlerResult;
 
     fn activity_type(&self) -> String;
 }

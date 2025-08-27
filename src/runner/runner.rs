@@ -2,7 +2,9 @@ use crate::activity::activity::{ActivityFuture, ActivityHandlerRegistry, Activit
 use crate::config::WorkerConfig;
 use crate::queue::queue::ActivityQueueTrait;
 use crate::runner::error::WorkerError;
-use crate::{activity::activity::Activity, ActivityContext, ActivityError, ActivityHandler, ActivityHandlerResult, ActivityQueue};
+use crate::{
+    activity::activity::Activity, ActivityContext, ActivityError, ActivityHandler, ActivityQueue,
+};
 use bb8_redis::bb8::Pool;
 use bb8_redis::RedisConnectionManager;
 use std::sync::Arc;
@@ -163,19 +165,17 @@ impl WorkerEngine {
                 match result {
                     Ok(activity_result) => match activity_result {
                         Ok(value) => {
-
-                                if let Err(e) = activity_queue.mark_completed(activity.id).await {
-                                    error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as completed");
+                            if let Err(e) = activity_queue.mark_completed(activity.id).await {
+                                error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as completed");
+                            }
+                            info!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "Activity completed successfully");
+                            if let Some(data) = value {
+                                // Store the result in the result queue
+                                if let Err(e) = activity_queue.store_result(activity.id, data).await
+                                {
+                                    error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to store activity result");
                                 }
-                                info!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "Activity completed successfully");
-                                if let Some(data) = value {
-                                    // Store the result in the result queue
-                                    if let Err(e) = activity_queue.store_result(activity.id, data).await
-                                    {
-                                        error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to store activity result");
-                                    }
-                                }
-
+                            }
                         }
                         Err(e) => match e {
                             ActivityError::Retry(reason) => {
@@ -190,7 +190,7 @@ impl WorkerEngine {
                                     error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
                                 }
                             }
-                        }
+                        },
                     },
                     Err(_) => {
                         let error_msg = "Activity execution timed out".to_string();
