@@ -26,7 +26,7 @@ runner_q = "0.1.0"
 
 ```rust
 use runner_q::{ActivityQueue, WorkerEngine, ActivityPriority, ActivityOption};
-use runner_q::{ActivityHandler, ActivityContext, ActivityResult};
+use runner_q::{ActivityHandler, ActivityContext, ActivityHandlerResult, ActivityError};
 use runner_q::config::WorkerConfig;
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -36,12 +36,15 @@ pub struct SendEmailActivity;
 
 #[async_trait]
 impl ActivityHandler for SendEmailActivity {
-    async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityResult {
-        // Process the email activity
-        let to = payload["to"].as_str().unwrap_or("unknown");
+    async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityHandlerResult {
+        // Process the email activity - use ? operator for clean error handling
+        let to = payload["to"]
+            .as_str()
+            .ok_or_else(|| ActivityError::NonRetry("Missing 'to' field".to_string()))?;
+        
         println!("Sending email to: {}", to);
         
-        ActivityResult::Success(Some(serde_json::json!({
+        Ok(Some(serde_json::json!({
             "message": format!("Email sent to {}", to),
             "status": "delivered"
         })))
@@ -146,26 +149,30 @@ pub struct PaymentActivity {
 
 #[async_trait]
 impl ActivityHandler for PaymentActivity {
-    async fn handle(&self, payload: Value, context: ActivityContext) -> ActivityResult {
-        // Parse the payment data
-        let amount = payload["amount"].as_f64().unwrap_or(0.0);
-        let currency = payload["currency"].as_str().unwrap_or("USD");
+    async fn handle(&self, payload: Value, context: ActivityContext) -> ActivityHandlerResult {
+        // Parse the payment data using ? operator
+        let amount = payload["amount"]
+            .as_f64()
+            .ok_or_else(|| ActivityError::NonRetry("Missing or invalid amount".to_string()))?;
+        
+        let currency = payload["currency"]
+            .as_str()
+            .unwrap_or("USD");
         
         println!("Processing payment: {} {}", amount, currency);
         
-        // Simulate payment processing
-        if amount > 0.0 {
-            // Return success with result data
-            ActivityResult::Success(Some(serde_json::json!({
-                "transaction_id": "txn_123456",
-                "amount": amount,
-                "currency": currency,
-                "status": "completed"
-            })))
-        } else {
-            // Return non-retryable failure
-            ActivityResult::NonRetry("Invalid amount".to_string())
+        // Validate amount
+        if amount <= 0.0 {
+            return Err(ActivityError::NonRetry("Invalid amount".to_string()));
         }
+        
+        // Simulate payment processing
+        Ok(Some(serde_json::json!({
+            "transaction_id": "txn_123456",
+            "amount": amount,
+            "currency": currency,
+            "status": "completed"
+        })))
     }
 
     fn activity_type(&self) -> String {
@@ -299,29 +306,41 @@ The library provides comprehensive error handling:
 
 ### Activity Handler Results
 
-In your activity handlers, you can return different result types:
+In your activity handlers, you can use the convenient `ActivityHandlerResult` type with the `?` operator for clean error handling:
 
 ```rust
+use runner_q::{ActivityHandler, ActivityContext, ActivityHandlerResult, ActivityError};
+
 #[async_trait]
 impl ActivityHandler for MyActivity {
-    async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityResult {
-        match some_operation() {
-            Ok(data) => {
-                // Success with optional result data
-                ActivityResult::Success(Some(serde_json::json!({"result": data})))
-            }
-            Err(retryable_error) => {
-                // Will be retried with exponential backoff
-                ActivityResult::Retry(format!("Temporary error: {}", retryable_error))
-            }
-            Err(permanent_error) => {
-                // Will not be retried, goes to dead letter queue
-                ActivityResult::NonRetry(format!("Permanent error: {}", permanent_error))
-            }
+    async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityHandlerResult {
+        // Use ? operator for automatic error conversion
+        let data: MyData = serde_json::from_value(payload)?;
+        
+        // Validate data
+        if data.is_invalid() {
+            return Err(ActivityError::NonRetry("Invalid data format".to_string()));
         }
+        
+        // Perform operation that might temporarily fail
+        let result = external_api_call(&data)
+            .await
+            .map_err(|e| ActivityError::Retry(format!("API call failed: {}", e)))?;
+        
+        // Return success with result data
+        Ok(Some(serde_json::json!({"result": result})))
+    }
+
+    fn activity_type(&self) -> String {
+        "my_activity".to_string()
     }
 }
 ```
+
+**Error Types:**
+- `ActivityError::Retry(message)` - Will be retried with exponential backoff
+- `ActivityError::NonRetry(message)` - Will not be retried, goes to dead letter queue
+- Any error implementing `Into<ActivityError>` can be used with `?`
 
 ### Worker Engine Errors
 
