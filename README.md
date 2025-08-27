@@ -246,41 +246,52 @@ println!("Email result: {:?}", email_result);
 Activities can execute other activities using the `ActivityExecutor` available in the `ActivityContext`. This enables powerful workflow orchestration:
 
 ```rust
-use runner_q::{ActivityExecutor, ActivityOption};
+use runner_q::{ActivityExecutor, ActivityOption, ActivityHandlerResult, ActivityError, ActivityPriority};
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize)]
+struct OrderData {
+    id: String,
+    customer_email: String,
+    items: Vec<String>,
+}
 
 #[async_trait]
 impl ActivityHandler for ProcessOrderActivity {
-    async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityResult {
+    async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityHandlerResult {
+        // Parse order data using ? operator for clean error handling
         let order: OrderData = serde_json::from_value(payload)?;
         
         // Execute sub-activities using the context's worker engine
         
         // 1. Update inventory
-        let inventory_future = context.worker_engine.execute_activity(
+        let _inventory_future = context.worker_engine.execute_activity(
             "update_inventory".to_string(),
             serde_json::json!({"item": "product_123", "quantity": -1}),
             Some(ActivityOption {
                 priority: Some(ActivityPriority::High),
                 max_retries: 3,
                 timeout_seconds: 60,
+                scheduled_at: None,
             })
-        ).await?;
+        ).await.map_err(|e| ActivityError::Retry(format!("Failed to update inventory: {}", e)))?;
         
         // 2. Send confirmation email
-        let email_future = context.worker_engine.execute_activity(
+        let _email_future = context.worker_engine.execute_activity(
             "send_email".to_string(),
             serde_json::json!({"to": order.customer_email, "template": "order_confirmation"}),
             None
-        ).await?;
+        ).await.map_err(|e| ActivityError::Retry(format!("Failed to send email: {}", e)))?;
         
         // 3. Log the transaction
         context.worker_engine.execute_activity(
             "log_transaction".to_string(),
             serde_json::json!({"order_id": order.id, "status": "processed"}),
             None
-        ).await?;
+        ).await.map_err(|e| ActivityError::NonRetry(format!("Failed to log transaction: {}", e)))?;
         
-        ActivityResult::Success(Some(serde_json::json!({
+        // Return success with result data
+        Ok(Some(serde_json::json!({
             "order_id": order.id,
             "status": "completed"
         })))
