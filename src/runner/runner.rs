@@ -1,12 +1,13 @@
 use crate::activity::activity::{ActivityFuture, ActivityHandlerRegistry, ActivityOption};
 use crate::config::WorkerConfig;
-use crate::queue::queue::ActivityQueueTrait;
+use crate::queue::queue::{ActivityQueueTrait, ActivityResult, ResultState};
 use crate::runner::error::WorkerError;
 use crate::{
     activity::activity::Activity, ActivityContext, ActivityError, ActivityHandler, ActivityQueue,
 };
 use bb8_redis::bb8::Pool;
 use bb8_redis::RedisConnectionManager;
+use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -169,25 +170,45 @@ impl WorkerEngine {
                                 error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as completed");
                             }
                             info!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "Activity completed successfully");
-                            if let Some(data) = value {
-                                // Store the result in the result queue
-                                if let Err(e) = activity_queue.store_result(activity.id, data).await
-                                {
-                                    error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to store activity result");
-                                }
+                            // Store the result in the result queue
+                            let activity_result = ActivityResult {
+                                data: value,
+                                state: ResultState::Ok,
+                            };
+                            if let Err(e) = activity_queue
+                                .store_result(activity.id, activity_result)
+                                .await
+                            {
+                                error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to store activity result");
                             }
                         }
                         Err(e) => match e {
                             ActivityError::Retry(reason) => {
                                 warn!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity requesting retry");
-                                if let Err(e) = activity_queue.mark_failed(activity, reason).await {
+                                if let Err(e) =
+                                    activity_queue.mark_failed(activity, reason, true).await
+                                {
                                     error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity for retry");
                                 }
                             }
                             ActivityError::NonRetry(reason) => {
                                 error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity failed");
-                                if let Err(e) = activity_queue.mark_failed(activity, reason).await {
+                                if let Err(e) = activity_queue
+                                    .mark_failed(activity, reason.clone(), false)
+                                    .await
+                                {
                                     error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
+                                }
+                                // Store the result in the result queue
+                                let activity_result = ActivityResult {
+                                    data: Some(json!(reason)),
+                                    state: ResultState::Ok,
+                                };
+                                if let Err(e) = activity_queue
+                                    .store_result(activity_id, activity_result)
+                                    .await
+                                {
+                                    error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to store activity result");
                                 }
                             }
                         },
@@ -195,7 +216,8 @@ impl WorkerEngine {
                     Err(_) => {
                         let error_msg = "Activity execution timed out".to_string();
                         error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, timeout = ?activity_timeout, "Activity timed out");
-                        if let Err(e) = activity_queue.mark_failed(activity, error_msg).await {
+                        if let Err(e) = activity_queue.mark_failed(activity, error_msg, true).await
+                        {
                             error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
                         }
                     }

@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 
-use crate::queue::queue::ActivityQueueTrait;
+use crate::queue::queue::{ActivityQueueTrait, ResultState};
 use crate::runner::runner::ActivityExecutor;
+use crate::WorkerError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
-
 // Import error handling types
 use super::error::ActivityError;
 
@@ -136,14 +136,20 @@ impl ActivityFuture {
     }
 
     // this method should consume the instance and hence only let get_result to be callable once on an ActivityFuture
-    pub async fn get_result(self) -> Result<serde_json::Value, crate::WorkerError> {
+    pub async fn get_result(self) -> Result<Option<serde_json::Value>, crate::WorkerError> {
         // Poll for result with timeout
         let timeout = std::time::Duration::from_secs(300); // 5 minutes timeout
         let start_time = std::time::Instant::now();
 
         loop {
             if let Some(result) = self.queue.get_result(self.activity_id).await? {
-                return Ok(result);
+                return match result.state {
+                    ResultState::Ok => Ok(result.data),
+                    ResultState::Err => {
+                        let result_json = serde_json::to_string(&result.data)?;
+                        Err(WorkerError::CustomError(result_json))
+                    }
+                };
             }
 
             if start_time.elapsed() > timeout {

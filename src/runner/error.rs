@@ -3,6 +3,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum WorkerError {
+    #[error("{0}")]
+    CustomError(String),
+
     #[error("Activity queue error: {0}")]
     QueueError(String),
 

@@ -79,7 +79,8 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create Redis connection pool
-//!     let redis_pool = bb8_redis::bb8::Pool::builder()
+//!     use serde_json::Value;
+//! let redis_pool = bb8_redis::bb8::Pool::builder()
 //!         .build(bb8_redis::RedisConnectionManager::new("redis://127.0.0.1:6379")?)
 //!         .await?;
 //!
@@ -126,8 +127,13 @@
 //!     // Spawn a task to handle the result
 //!     tokio::spawn(async move {
 //!         if let Ok(result) = future.get_result().await {
-//!             let email_result: EmailResult = serde_json::from_value(result).unwrap();
-//!             println!("Email result: {:?}", email_result);
+//!             match result {
+//!                 None => {}
+//!                 Some(data) => {
+//!                     let email_result: EmailResult = serde_json::from_value(data).unwrap();
+//!                     println!("Email result: {:?}", email_result);
+//!                 }
+//!             }
 //!         }
 //!     });
 //!
