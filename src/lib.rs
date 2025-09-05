@@ -22,6 +22,7 @@
 //! use std::sync::Arc;
 //! use async_trait::async_trait;
 //! use serde::{Serialize, Deserialize};
+//! use serde_json::Value;
 //!
 //! // Define activity types
 //! #[derive(Debug, Clone)]
@@ -79,7 +80,6 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create Redis connection pool
-//!     use serde_json::Value;
 //!     let redis_pool = bb8_redis::bb8::Pool::builder()
 //!         .build(bb8_redis::RedisConnectionManager::new("redis://127.0.0.1:6379")?)
 //!         .await?;
