@@ -80,7 +80,7 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create Redis connection pool
 //!     use serde_json::Value;
-//! let redis_pool = bb8_redis::bb8::Pool::builder()
+//!     let redis_pool = bb8_redis::bb8::Pool::builder()
 //!         .build(bb8_redis::RedisConnectionManager::new("redis://127.0.0.1:6379")?)
 //!         .await?;
 //!
