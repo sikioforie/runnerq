@@ -19,7 +19,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-runner_q = "0.3.0"
+runner_q = "0.4.0"
 ```
 
 ## Quick Start
@@ -91,7 +91,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn a task to handle the result
     tokio::spawn(async move {
         if let Ok(result) = future.get_result().await {
-            println!("Email result: {:?}", result);
+            match result {
+                Some(data) => {
+                    println!("Email result: {:?}", data);       
+                }
+                _ => {}
+            }
         }
     });
 
@@ -362,7 +367,10 @@ match worker_engine.execute_activity(activity_type.to_string(), payload, options
     Ok(future) => {
         // Activity was successfully enqueued
         match future.get_result().await {
-            Ok(result) => println!("Activity completed: {:?}", result),
+            Ok(result) => match result {
+                Some(data) => println!("Activity completed: {:?}", result),
+                None => {}
+            },
             Err(WorkerError::Timeout) => println!("Activity timed out"),
             Err(e) => println!("Activity failed: {}", e),
         }

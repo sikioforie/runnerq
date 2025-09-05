@@ -22,6 +22,7 @@
 //! use std::sync::Arc;
 //! use async_trait::async_trait;
 //! use serde::{Serialize, Deserialize};
+//! use serde_json::Value;
 //!
 //! // Define activity types
 //! #[derive(Debug, Clone)]
@@ -126,8 +127,13 @@
 //!     // Spawn a task to handle the result
 //!     tokio::spawn(async move {
 //!         if let Ok(result) = future.get_result().await {
-//!             let email_result: EmailResult = serde_json::from_value(result).unwrap();
-//!             println!("Email result: {:?}", email_result);
+//!             match result {
+//!                 None => {}
+//!                 Some(data) => {
+//!                     let email_result: EmailResult = serde_json::from_value(data).unwrap();
+//!                     println!("Email result: {:?}", email_result);
+//!                 }
+//!             }
 //!         }
 //!     });
 //!

@@ -3,6 +3,7 @@ use crate::{activity::activity::Activity, ActivityPriority, ActivityStatus};
 use async_trait::async_trait;
 use bb8_redis::{bb8::Pool, RedisConnectionManager};
 use redis::AsyncCommands;
+use serde::{Deserialize, Serialize};
 use serde_json;
 use std::time::Duration;
 use tracing::{debug, error, info};
@@ -24,6 +25,7 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
         &self,
         activity: Activity,
         error_message: String,
+        retryable: bool,
     ) -> Result<(), WorkerError>;
 
     /// Schedule an activity for future execution
@@ -40,14 +42,14 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
     async fn store_result(
         &self,
         activity_id: uuid::Uuid,
-        result: serde_json::Value,
+        result: ActivityResult,
     ) -> Result<(), WorkerError>;
 
     /// Retrieve activity result
     async fn get_result(
         &self,
         activity_id: uuid::Uuid,
-    ) -> Result<Option<serde_json::Value>, WorkerError>;
+    ) -> Result<Option<ActivityResult>, WorkerError>;
 }
 
 /// Redis-based implementation of ActivityQueueTrait
@@ -193,8 +195,14 @@ impl ActivityQueueTrait for ActivityQueue {
         &self,
         activity: Activity,
         error_message: String,
+        retryable: bool,
     ) -> Result<(), WorkerError> {
         let activity_id = activity.id;
+        if !retryable {
+            self.update_activity_status(&activity_id, &ActivityStatus::Failed)
+                .await?;
+        }
+
         if activity.max_retries == 0 || activity.retry_count < activity.max_retries {
             // Requeue for retry
             let mut retry_activity = activity;
@@ -324,14 +332,14 @@ impl ActivityQueueTrait for ActivityQueue {
     async fn store_result(
         &self,
         activity_id: uuid::Uuid,
-        result: serde_json::Value,
+        result: ActivityResult,
     ) -> Result<(), WorkerError> {
         let mut conn = self.redis_pool.get().await.map_err(|e| {
             WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
         })?;
 
         let result_key = format!("result:{}", activity_id);
-        let result_json = serde_json::to_string(&result)?;
+        let result_json = serde_json::to_value(result)?.to_string();
 
         // Store result with TTL (24 hours)
         let _: () = conn.set_ex(&result_key, result_json, 86400).await?;
@@ -344,7 +352,7 @@ impl ActivityQueueTrait for ActivityQueue {
     async fn get_result(
         &self,
         activity_id: uuid::Uuid,
-    ) -> Result<Option<serde_json::Value>, WorkerError> {
+    ) -> Result<Option<ActivityResult>, WorkerError> {
         let mut conn = self.redis_pool.get().await.map_err(|e| {
             WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
         })?;
@@ -354,7 +362,7 @@ impl ActivityQueueTrait for ActivityQueue {
 
         match result_json {
             Some(json) => {
-                let result: serde_json::Value = serde_json::from_str(&json)?;
+                let result: ActivityResult = serde_json::from_str(&json)?;
                 Ok(Some(result))
             }
             None => Ok(None),
@@ -371,4 +379,15 @@ pub struct QueueStats {
     pub low_priority: u64,
     pub scheduled_activitys: u64,
     pub dead_letter_activitys: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) enum ResultState {
+    Ok,
+    Err,
+}
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ActivityResult {
+    pub data: Option<serde_json::Value>,
+    pub state: ResultState,
 }
