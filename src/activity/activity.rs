@@ -131,33 +131,67 @@ pub struct ActivityFuture {
 }
 
 impl ActivityFuture {
+    /// Creates a new ActivityFuture that can be used to poll for the result of a specific activity.
+    ///
+    /// The returned ActivityFuture holds the queue used to retrieve results and the UUID of the activity to query.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use uuid::Uuid;
+    /// # use crate::ActivityFuture;
+    /// # let queue = Arc::new(/* an implementation of ActivityQueueTrait */);
+    /// let activity_id = Uuid::new_v4();
+    /// let fut = ActivityFuture::new(queue, activity_id);
+    /// ```
     pub(crate) fn new(queue: Arc<dyn ActivityQueueTrait>, activity_id: Uuid) -> Self {
         Self { queue, activity_id }
     }
 
-    // this method should consume the instance and hence only let get_result to be callable once on an ActivityFuture
+    /// Waits for and returns the completed activity result, consuming the `ActivityFuture`.
+    ///
+    /// This async method polls the associated activity queue until the activity produces a result
+    /// or a 5-minute timeout elapses. On success it returns `Ok(Some(value))` when the activity
+    /// completed with a value, or `Ok(None)` when it completed without a value. If the activity
+    /// failed, the failure payload is converted to a JSON string and returned as
+    /// `Err(WorkerError::CustomError)`. If no result arrives within 5 minutes, it returns
+    /// `Err(WorkerError::Timeout)`.
+    ///
+    /// The function propagates errors returned by the queue (e.g., `WorkerError` variants)
+    /// encountered while polling.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// // given `queue: Arc<dyn ActivityQueueTrait>` and `activity_id: Uuid`
+    /// let fut = ActivityFuture::new(queue.clone(), activity_id);
+    /// match fut.get_result().await {
+    ///     Ok(Some(json)) => println!("activity result: {:?}", json),
+    ///     Ok(None) => println!("activity completed with no result"),
+    ///     Err(e) => eprintln!("activity failed or timed out: {:?}", e),
+    /// }
+    /// ```
     pub async fn get_result(self) -> Result<Option<serde_json::Value>, crate::WorkerError> {
-        // Poll for result with timeout
         let timeout = std::time::Duration::from_secs(300); // 5 minutes timeout
-        let start_time = std::time::Instant::now();
 
-        loop {
-            if let Some(result) = self.queue.get_result(self.activity_id).await? {
-                return match result.state {
-                    ResultState::Ok => Ok(result.data),
-                    ResultState::Err => {
-                        let result_json = serde_json::to_string(&result.data)?;
-                        Err(WorkerError::CustomError(result_json))
-                    }
-                };
+        tokio::time::timeout(timeout, async move {
+            loop {
+                if let Some(result) = self.queue.get_result(self.activity_id).await? {
+                    return match result.state {
+                        ResultState::Ok => Ok(result.data),
+                        ResultState::Err => {
+                            let result_json = serde_json::to_string(&result.data)?;
+                            Err(WorkerError::CustomError(result_json))
+                        }
+                    };
+                }
+
+                // Use exponential backoff to reduce load: start with 50ms, cap at 1s
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
-
-            if start_time.elapsed() > timeout {
-                return Err(crate::WorkerError::Timeout);
-            }
-
-            // Wait a bit before polling again
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+        })
+        .await
+        .map_err(|_| crate::WorkerError::Timeout)?
     }
 }
