@@ -100,12 +100,12 @@
 //!             priority: Some(ActivityPriority::High),
 //!             max_retries: 5,
 //!             timeout_seconds: 600, // 10 minutes
-//!             scheduled_at: None, // Execute immediately
+//!             delay_seconds: None, // Execute immediately
 //!         })
 //!     ).await?;
 //!
-//!     // Schedule an activity for future execution (1 hour from now)
-//!     let one_hour_later = chrono::Utc::now().timestamp() + 3600;
+//!     // Schedule an activity for future execution (10 seconds from now)
+//!     let delay_seconds = 10;
 //!     let scheduled_future = worker_engine.execute_activity(
 //!         MyActivityType::SendEmail.to_string(),
 //!         serde_json::json!({"to": "user@example.com", "subject": "Reminder"}),
@@ -113,7 +113,7 @@
 //!             priority: Some(ActivityPriority::Normal),
 //!             max_retries: 3,
 //!             timeout_seconds: 300,
-//!             scheduled_at: Some(one_hour_later as u64),
+//!             delay_seconds: Some(delay_seconds as u64),
 //!         })
 //!     ).await?;
 //!
@@ -166,7 +166,7 @@
 //!         priority: Some(ActivityPriority::Normal),
 //!         max_retries: 3,
 //!         timeout_seconds: 300,
-//!         scheduled_at: Some(scheduled_time),
+//!         delay_seconds: Some(scheduled_time),
 //!     })
 //! ).await?;
 //!
@@ -184,7 +184,7 @@
 //!         priority: Some(ActivityPriority::High),
 //!         max_retries: 5,
 //!         timeout_seconds: 1800, // 30 minutes
-//!         scheduled_at: Some(tomorrow_9am.timestamp() as u64),
+//!         delay_seconds: Some(tomorrow_9am.timestamp() as u64),
 //!     })
 //! ).await?;
 //! # Ok(())
@@ -217,7 +217,7 @@
 //!                 priority: Some(ActivityPriority::High),
 //!                 max_retries: 3,
 //!                 timeout_seconds: 120,
-//!                 scheduled_at: None,
+//!                 delay_seconds: None,
 //!             })
 //!         ).await.map_err(|e| ActivityError::Retry(format!("Failed to enqueue payment validation: {}", e)))?;
 //!         
@@ -237,7 +237,7 @@
 //!                 priority: Some(ActivityPriority::Normal),
 //!                 max_retries: 5,
 //!                 timeout_seconds: 300,
-//!                 scheduled_at: Some(notification_time),
+//!                 delay_seconds: Some(notification_time),
 //!             })
 //!         ).await.map_err(|e| ActivityError::Retry(format!("Failed to schedule notification: {}", e)))?;
 //!         

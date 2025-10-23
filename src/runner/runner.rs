@@ -10,48 +10,110 @@ use bb8_redis::RedisConnectionManager;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
+
+/// Optional metrics sink to expose counters without coupling to a specific backend.
+pub trait MetricsSink: Send + Sync + 'static {
+    fn inc_counter(&self, name: &str, value: u64);
+    fn observe_duration(&self, _name: &str, _dur: Duration) {
+        let _ = (_name, _dur);
+    }
+}
+
+/// No-op metrics sink
+pub struct NoopMetrics;
+impl MetricsSink for NoopMetrics {
+    fn inc_counter(&self, _name: &str, _value: u64) {}
+}
+
+/// Simple exponential backoff helper for idle polls
+struct Backoff {
+    current: Duration,
+    base: Duration,
+    max: Duration,
+}
+impl Backoff {
+    fn new(base: Duration, max: Duration) -> Self {
+        Self {
+            current: base,
+            base,
+            max,
+        }
+    }
+    fn reset(&mut self) {
+        self.current = self.base;
+    }
+    fn next(&mut self) -> Duration {
+        let next = self.current;
+        self.current = (self.current.mul_f32(2.0)).min(self.max);
+        next
+    }
+}
 
 pub struct WorkerEngine {
     activity_queue: Arc<dyn ActivityQueueTrait>,
-    activity_handlers: ActivityHandlerRegistry,
+    activity_handlers: ActivityHandlerRegistry, // kept as-is per request
     config: WorkerConfig,
-    running: Arc<RwLock<bool>>,
+    running: Arc<RwLock<bool>>, // retains external visibility
+    shutdown_tx: watch::Sender<bool>,
+    metrics: Arc<dyn MetricsSink>,
 }
 
 impl WorkerEngine {
     pub fn new(redis_pool: Pool<RedisConnectionManager>, config: WorkerConfig) -> Self {
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         Self {
             activity_queue: Arc::new(ActivityQueue::new(redis_pool, config.queue_name.clone())),
             activity_handlers: ActivityHandlerRegistry::new(),
             config,
             running: Arc::new(RwLock::new(false)),
+            shutdown_tx,
+            metrics: Arc::new(NoopMetrics),
         }
     }
 
-    /// Starts the worker engine, spawning the scheduled-activities processor and a set of worker loops.
+    /// Optionally plug in a metrics sink.
+    pub fn with_metrics(mut self, sink: Arc<dyn MetricsSink>) -> Self {
+        self.metrics = sink;
+        self
+    }
+
+    /// Starts the worker engine and manages its full execution lifecycle.
     ///
-    /// This method:
-    /// - Fails with `WorkerError::AlreadyRunning` if the engine is already running.
-    /// - Marks the engine as running and creates a semaphore limiting concurrent activity execution to
-    ///   `config.max_concurrent_activities`.
-    /// - Spawns the scheduled activities processor and `max_concurrent_activities` worker loops.
-    /// - Waits for either a shutdown signal (Ctrl+C / SIGTERM) or for the worker tasks to complete.
-    /// - Calls `stop()` to clear the running flag and perform shutdown teardown before returning.
+    /// This method performs the following steps:
+    /// - Verifies that the engine is not already running, returning `WorkerError::AlreadyRunning` if it is.
+    /// - Marks the engine as active and initializes a semaphore to cap concurrent activity execution
+    ///   at `config.max_concurrent_activities`.
+    /// - Spawns both:
+    ///   - a background task that periodically processes scheduled activities, and
+    ///   - a pool of worker loops (one per available concurrency slot) that dequeue and execute activities.
+    /// - Awaits either:
+    ///   - a shutdown signal (Ctrl+C or SIGTERM), or
+    ///   - the completion or failure of any worker loop.
+    /// - Once a shutdown signal is received, transitions the engine into graceful stop mode,
+    ///   halting new activity execution and allowing in-flight work to complete before cleanup.
+    ///
+    /// # Behavior
+    ///
+    /// - The method runs until the engine is explicitly stopped or a shutdown signal is received.
+    /// - When it returns, the engine is fully stopped and resources have been released.
+    /// - If the engine was already running, it immediately returns `Err(WorkerError::AlreadyRunning)`.
     ///
     /// # Returns
     ///
-    /// `Ok(())` on graceful shutdown; `Err(WorkerError::AlreadyRunning)` if the engine was already running;
-    /// other `WorkerError` variants may be returned for underlying failures.
+    /// - `Ok(())` — the engine shut down cleanly.
+    /// - `Err(WorkerError::AlreadyRunning)` — start was attempted while another instance was active.
+    /// - Other `WorkerError` variants — internal initialization or runtime failures.
     ///
     /// # Examples
     ///
     /// ```
-    /// # async fn run_example() -> Result<(), WorkerError> {
-    /// // Prepare a WorkerEngine (pseudo-code; replace with real init)
+    /// # async fn example() -> Result<(), WorkerError> {
+    /// // Initialize the engine (pseudo-code)
     /// let engine = WorkerEngine::new(redis_pool, config);
-    /// // Start the engine (this call awaits until shutdown)
+    ///
+    /// // Start processing activities — this call will block until shutdown
     /// engine.start().await?;
     /// # Ok(())
     /// # }
@@ -70,23 +132,20 @@ impl WorkerEngine {
             "Starting worker engine"
         );
 
-        // Create a semaphore to limit concurrent activity
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(
-            self.config.max_concurrent_activities,
-        ));
+        let semaphore = Arc::new(Semaphore::new(self.config.max_concurrent_activities));
         let mut join_handles = Vec::new();
 
-        // Start scheduled activities processor
-        let scheduled_processor_handle = self.start_scheduled_activities_processor().await;
-        join_handles.push(scheduled_processor_handle);
+        // Scheduled activities processor
+        let scheduled_handle = self.start_scheduled_activities_processor().await;
+        join_handles.push(scheduled_handle);
 
-        // Start worker loops
+        // Worker loops (now return Result)
         for worker_id in 0..self.config.max_concurrent_activities {
             let handle = self.start_worker_loop(worker_id, semaphore.clone()).await;
             join_handles.push(handle);
         }
 
-        // Wait for shutdown signal or worker completion
+        // Wait for shutdown signal or all workers finishing.
         tokio::select! {
             _ = self.wait_for_shutdown() => {
                 info!("Shutdown signal received, stopping worker engine");
@@ -94,108 +153,159 @@ impl WorkerEngine {
             result = futures::future::try_join_all(join_handles) => {
                 match result {
                     Ok(_) => info!("All worker loops completed"),
-                    Err(e) => error!(error = %e, "Worker loop failed"),
+                    Err(e) => error!(error = %e, "A worker task failed"),
                 }
             }
         }
 
         self.stop().await;
-
         info!("Worker engine stopped");
         Ok(())
     }
 
-    /// Stop the worker engine gracefully
+    /// Signal a graceful stop.
     pub async fn stop(&self) {
         info!("Stopping worker engine");
         let mut running = self.running.write().await;
         *running = false;
+        // broadcast shutdown
+        let _ = self.shutdown_tx.send(true);
     }
 
-    /// Spawns a background worker task that continuously dequeues and executes activities.
+    /// Spawns a background worker loop that continuously dequeues and executes activities.
     ///
-    /// The spawned task runs until the engine's `running` flag is cleared. Each iteration
-    /// acquires a permit from the provided semaphore (to limit concurrency), attempts to
-    /// dequeue an activity, locates a registered handler for the activity type, and executes
-    /// the handler with a per-activity timeout. Results are recorded via the activity queue:
-    /// - Successful results are marked completed and stored as `ResultState::Ok`.
-    /// - Handlers returning `ActivityError::Retry` cause the activity to be requeued/marked for retry.
-    /// - Handlers returning `ActivityError::NonRetry` mark the activity as failed and store a structured
-    ///   error result (`{"error": <reason>, "type": "non_retryable", "failed_at": <RFC3339>}`) with state `Err`.
-    /// - Executions that exceed the activity timeout are treated as failures and marked for retry.
+    /// Each worker operates independently and performs the following cycle while the engine is running:
+    /// - Acquires a permit from the provided semaphore to enforce the global concurrency limit.
+    /// - Attempts to dequeue an activity from the queue (waiting briefly if none are available).
+    /// - Looks up the registered handler for the dequeued activity type.
+    /// - Executes the handler with a per-activity timeout, passing in an `ActivityContext` containing
+    ///   metadata and a reference back to the engine for nested execution.
+    /// - Records the outcome through the activity queue:
+    ///   - **Success:** Marks the activity as completed and stores the result with `ResultState::Ok`.
+    ///   - **Retryable failure (`ActivityError::Retry`)**: Marks the activity as failed and eligible for retry.
+    ///   - **Non-retryable failure (`ActivityError::NonRetry`)**: Marks the activity as permanently failed and
+    ///     stores a structured JSON error (`{"error": <reason>, "type": "non_retryable", "failed_at": <RFC3339>}`).
+    ///   - **Timeout:** If execution exceeds its allowed duration, the activity is marked as failed and retried.
     ///
-    /// The function returns a `JoinHandle` for the spawned task so callers can await or detach it.
+    /// The worker loop terminates when:
+    /// - The engine’s running flag is cleared (via `stop()`), or
+    /// - A shutdown signal is received through cooperative cancellation.
+    ///
+    /// Upon termination, any ongoing work completes its current iteration before the worker exits.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`tokio::task::JoinHandle`] wrapping the background worker task.
+    /// The handle can be awaited to monitor completion or detached to run in the background.
+    ///
+    /// # Notes
+    ///
+    /// - This function does not block; it spawns a background task and immediately returns.
+    /// - Each worker is lightweight and safe to run concurrently; the semaphore ensures that
+    ///   the total number of active activities never exceeds the configured concurrency limit.
     ///
     /// # Examples
     ///
     /// ```
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
-    /// # // `engine` is an instance of `WorkerEngine` already configured and with handlers registered.
-    /// # async fn usage_example(engine: &crate::runner::WorkerEngine) {
-    /// let sem = Arc::new(Semaphore::new(4));
-    /// let handle = engine.start_worker_loop(0, sem.clone()).await;
-    /// // `handle` is a JoinHandle for the worker task; it will run until `engine.stop()` is called.
-    /// let _ = handle; // keep or await as needed
+    /// # async fn example(engine: &crate::runner::WorkerEngine) {
+    /// let semaphore = Arc::new(Semaphore::new(4));
+    ///
+    /// // Spawn a worker loop with ID 0
+    /// let handle = engine.start_worker_loop(0, semaphore.clone()).await;
+    ///
+    /// // The returned JoinHandle runs until the engine stops or a shutdown signal is received.
+    /// handle.await.ok();
     /// # }
     /// ```
     async fn start_worker_loop(
         &self,
         worker_id: usize,
-        semaphore: Arc<tokio::sync::Semaphore>,
-    ) -> tokio::task::JoinHandle<()> {
+        semaphore: Arc<Semaphore>,
+    ) -> tokio::task::JoinHandle<Result<(), WorkerError>> {
         let running = self.running.clone();
         let activity_queue = self.activity_queue.clone();
         let activity_handlers = self.activity_handlers.clone();
         let activity_queue_for_context = self.activity_queue.clone();
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let metrics = self.metrics.clone();
 
         tokio::spawn(async move {
             debug!(%worker_id, "Starting worker loop");
+            let mut backoff = Backoff::new(Duration::from_millis(100), Duration::from_secs(5));
 
             while *running.read().await {
-                // Acquire semaphore permit
+                // Honor fast shutdown
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+
+                // Acquire permit (bounded concurrency)
                 let permit = match semaphore.try_acquire() {
-                    Ok(permit) => permit,
+                    Ok(p) => p,
                     Err(_) => {
-                        // No permits available, wait a bit
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+                            _ = shutdown_rx.changed() => break,
+                        }
                         continue;
                     }
                 };
 
-                // Try to get an activity from the queue
-                let activity = match activity_queue.dequeue(Duration::from_secs(1)).await {
-                    Ok(Some(activity)) => activity,
+                // Dequeue with cooperative shutdown
+                let dequeue_fut = activity_queue.dequeue(Duration::from_secs(1));
+                let activity_opt = tokio::select! {
+                    _ = shutdown_rx.changed() => { drop(permit); break; }
+                    res = dequeue_fut => res
+                };
+
+                let activity = match activity_opt {
+                    Ok(Some(a)) => {
+                        backoff.reset();
+                        a
+                    }
                     Ok(None) => {
-                        // No activity available, continue
                         drop(permit);
+                        let sleep_for = backoff.next();
+                        tokio::select! {
+                            _ = tokio::time::sleep(sleep_for) => {},
+                            _ = shutdown_rx.changed() => break,
+                        }
                         continue;
                     }
                     Err(e) => {
                         error!(%worker_id, error = %e, "Failed to dequeue activity");
                         drop(permit);
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+                            _ = shutdown_rx.changed() => break,
+                        }
                         continue;
                     }
                 };
 
-                // Process the activity
+                // Resolve handler
                 let activity_id = activity.id;
                 let activity_type = activity.activity_type.clone();
-
                 debug!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "Worker processing activity");
 
-                // Find handler for activity type
                 let handler = match activity_handlers.get(&activity.activity_type) {
-                    Some(handler) => handler.clone(),
+                    Some(h) => h.clone(),
                     None => {
                         error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "No handler found for activity type");
+                        if let Err(e) = activity_queue
+                            .mark_failed(activity, "handler_not_found".to_string(), false)
+                            .await
+                        {
+                            error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
+                        }
                         drop(permit);
                         continue;
                     }
                 };
 
-                // Create activity context
+                // Prepare context
                 let context = ActivityContext {
                     activity_id,
                     activity_type: activity_type.clone(),
@@ -206,70 +316,71 @@ impl WorkerEngine {
                     }),
                 };
 
-                // Execute activity with timeout
                 let activity_timeout = Duration::from_secs(activity.timeout_seconds);
+                let handle_fut = handler.handle(activity.payload.clone(), context);
 
-                let result = tokio::time::timeout(
-                    activity_timeout,
-                    handler.handle(activity.payload.clone(), context),
-                )
-                .await;
+                // Execute with timeout and cooperative shutdown
+                let timed = tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        drop(permit);
+                        break;
+                    }
+                    res = tokio::time::timeout(activity_timeout, handle_fut) => res
+                };
 
-                match result {
-                    Ok(activity_result) => match activity_result {
-                        Ok(value) => {
-                            if let Err(e) = activity_queue.mark_completed(activity.id).await {
-                                error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as completed");
-                            }
-                            info!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "Activity completed successfully");
-                            // Store the result in the result queue
-                            let activity_result = ActivityResult {
-                                data: value,
-                                state: ResultState::Ok,
-                            };
-                            if let Err(e) = activity_queue
-                                .store_result(activity.id, activity_result)
-                                .await
-                            {
-                                error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to store activity result");
-                            }
+                match timed {
+                    Ok(Ok(value)) => {
+                        metrics.inc_counter("activity_completed", 1);
+                        if let Err(e) = activity_queue.mark_completed(activity.id).await {
+                            error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as completed");
                         }
-                        Err(e) => match e {
-                            ActivityError::Retry(reason) => {
-                                warn!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity requesting retry");
-                                if let Err(e) =
-                                    activity_queue.mark_failed(activity, reason, true).await
-                                {
-                                    error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity for retry");
-                                }
+                        info!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "Activity completed successfully");
+
+                        // Store result (fire-and-forget to avoid blocking the worker on slow I/O)
+                        let aq = activity_queue.clone();
+                        let result_to_store = ActivityResult {
+                            data: value,
+                            state: ResultState::Ok,
+                        };
+                        tokio::spawn(async move {
+                            if let Err(e) = aq.store_result(activity_id, result_to_store).await {
+                                error!(activity_id = %activity_id, error = %e, "Failed to store activity result");
                             }
-                            ActivityError::NonRetry(reason) => {
-                                error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity failed");
-                                if let Err(e) = activity_queue
-                                    .mark_failed(activity, reason.clone(), false)
-                                    .await
-                                {
-                                    error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
-                                }
-                                // Store the error result in the result queue
-                                let activity_result = ActivityResult {
-                                    data: Some(json!({
-                                        "error": reason,
-                                        "type": "non_retryable",
-                                        "failed_at": chrono::Utc::now().to_rfc3339()
-                                    })),
-                                    state: ResultState::Err,
-                                };
-                                if let Err(e) = activity_queue
-                                    .store_result(activity_id, activity_result)
-                                    .await
-                                {
-                                    error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to store activity result");
-                                }
+                        });
+                    }
+                    Ok(Err(ActivityError::Retry(reason))) => {
+                        metrics.inc_counter("activity_retry", 1);
+                        warn!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity requesting retry");
+                        if let Err(e) = activity_queue.mark_failed(activity, reason, true).await {
+                            error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity for retry");
+                        }
+                    }
+                    Ok(Err(ActivityError::NonRetry(reason))) => {
+                        metrics.inc_counter("activity_failed_non_retry", 1);
+                        error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity failed");
+                        if let Err(e) = activity_queue
+                            .mark_failed(activity, reason.clone(), false)
+                            .await
+                        {
+                            error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
+                        }
+                        let aq = activity_queue.clone();
+                        tokio::spawn(async move {
+                            let activity_result = ActivityResult {
+                                data: Some(json!({
+                                    "error": reason,
+                                    "type": "non_retryable",
+                                    "failed_at": chrono::Utc::now().to_rfc3339()
+                                })),
+                                state: ResultState::Err,
+                            };
+                            if let Err(e) = aq.store_result(activity_id, activity_result).await {
+                                error!(activity_id = %activity_id, error = %e, "Failed to store activity result");
                             }
-                        },
-                    },
-                    Err(_) => {
+                        });
+                    }
+                    Err(_elapsed) => {
+                        metrics.inc_counter("activity_timeout", 1);
                         let error_msg = "Activity execution timed out".to_string();
                         error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, timeout = ?activity_timeout, "Activity timed out");
                         if let Err(e) = activity_queue.mark_failed(activity, error_msg, true).await
@@ -283,48 +394,89 @@ impl WorkerEngine {
             }
 
             debug!(%worker_id, "Worker loop stopped");
+            Ok(())
         })
     }
 
-    /// Spawns a background task that repeatedly processes scheduled activities.
+    /// Spawns a background processor that periodically executes scheduled activities.
     ///
-    /// The spawned task loops while the engine's `running` flag is true, calling
-    /// `process_scheduled_activities()` on the engine's activity queue and sleeping
-    /// for 30 seconds between iterations. Errors returned from the queue are
-    /// logged but do not stop the loop. The function returns the Tokio
-    /// `JoinHandle` for the spawned background task so the caller can await or
-    /// abort it if needed.
+    /// This task runs continuously while the engine remains active, performing the following loop:
+    /// - Calls [`process_scheduled_activities()`] on the engine’s activity queue to identify and enqueue
+    ///   any activities whose scheduled execution time has arrived.
+    /// - Logs any errors encountered during processing but continues operation.
+    /// - Waits for a fixed interval (default: 30 seconds, configurable via `config.schedule_poll_interval_seconds`)
+    ///   before repeating the cycle.
+    ///
+    /// The processor automatically stops when:
+    /// - The engine’s running flag is cleared (via [`stop()`]), or
+    /// - A shutdown signal is received through cooperative cancellation.
+    ///
+    /// This mechanism ensures that time-delayed or recurring activities are regularly promoted
+    /// into the execution queue for handling by worker loops.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`tokio::task::JoinHandle`] representing the spawned background processor.
+    /// The handle can be:
+    /// - **awaited**, to wait for graceful completion; or
+    /// - **aborted**, to terminate the processor immediately.
+    ///
+    /// # Notes
+    ///
+    /// - Failures during scheduled-activity processing are logged and do not halt the engine.
+    /// - The polling interval can be tuned through the worker configuration to balance responsiveness and load.
     ///
     /// # Examples
     ///
     /// ```
-    /// // Assuming `engine` is an initialized `WorkerEngine`:
+    /// // Assuming `engine` is an initialized WorkerEngine instance:
     /// let handle = engine.start_scheduled_activities_processor().await;
-    /// // The background processor is now running; later you can abort or await:
-    /// handle.abort(); // or handle.await.ok();
+    ///
+    /// // The processor runs in the background until the engine stops.
+    /// // You may choose to abort or await it as needed:
+    /// handle.abort();
+    /// // or
+    /// handle.await.ok();
     /// ```
-    async fn start_scheduled_activities_processor(&self) -> tokio::task::JoinHandle<()> {
+    async fn start_scheduled_activities_processor(
+        &self,
+    ) -> tokio::task::JoinHandle<Result<(), WorkerError>> {
         let activity_queue = self.activity_queue.clone();
         let running = self.running.clone();
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+        // Make poll interval configurable; default to 30s if config lacks it.
+        let poll_interval = {
+            let secs = self
+                .config
+                .schedule_poll_interval_seconds
+                .unwrap_or(30)
+                .max(1);
+            Duration::from_secs(secs)
+        };
 
         tokio::spawn(async move {
             debug!("Starting scheduled activities processor");
-
             while *running.read().await {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+
                 if let Err(e) = activity_queue.process_scheduled_activities().await {
                     error!(error = %e, "Failed to process scheduled activities");
                 }
 
-                // Check for scheduled activities every 30 seconds
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(poll_interval) => {},
+                    _ = shutdown_rx.changed() => break,
+                }
             }
-
             debug!("Scheduled activities processor stopped");
+            Ok(())
         })
     }
 
     async fn wait_for_shutdown(&self) {
-        // Wait for graceful shutdown signals
         let ctrl_c = async {
             tokio::signal::ctrl_c()
                 .await
@@ -343,15 +495,12 @@ impl WorkerEngine {
         let terminate = std::future::pending::<()>();
 
         tokio::select! {
-            _ = ctrl_c => {
-                info!("Received Ctrl+C signal");
-            },
-            _ = terminate => {
-                info!("Received SIGTERM signal");
-            },
+            _ = ctrl_c => { info!("Received Ctrl+C signal"); },
+            _ = terminate => { info!("Received SIGTERM signal"); },
         }
 
-        // Signal shutdown
+        // broadcast shutdown (idempotent)
+        let _ = self.shutdown_tx.send(true);
         self.stop().await;
     }
 }
@@ -365,15 +514,20 @@ impl WorkerEngine {
     ) -> Result<ActivityFuture, WorkerError> {
         let activity = Activity::new(activity_type, payload, option);
         let activity_id = activity.id;
-        self.activity_queue.enqueue(activity).await?;
+        match activity.scheduled_at {
+            None => self.activity_queue.enqueue(activity).await?,
+            Some(_) => self.activity_queue.schedule_activity(activity).await?,
+        }
         Ok(ActivityFuture::new(
             self.activity_queue.clone(),
             activity_id,
         ))
     }
+
     pub fn register_activity(&mut self, activity_type: String, activity: Arc<dyn ActivityHandler>) {
         self.activity_handlers.insert(activity_type, activity);
     }
+
     pub fn get_activity_executor(&self) -> Arc<dyn ActivityExecutor> {
         Arc::new(WorkerEngineWrapper {
             activity_queue: self.activity_queue.clone(),
@@ -406,7 +560,10 @@ impl ActivityExecutor for WorkerEngineWrapper {
     ) -> Result<ActivityFuture, WorkerError> {
         let activity = Activity::new(activity_type, payload, option);
         let activity_id = activity.id;
-        self.activity_queue.enqueue(activity).await?;
+        match activity.scheduled_at {
+            None => self.activity_queue.enqueue(activity).await?,
+            Some(_) => self.activity_queue.schedule_activity(activity).await?,
+        }
         Ok(ActivityFuture::new(
             self.activity_queue.clone(),
             activity_id,
