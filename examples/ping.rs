@@ -1,4 +1,4 @@
-use runner_q::{ActivityQueue, WorkerEngine, ActivityPriority, ActivityOption};
+use runner_q::{ActivityQueue, WorkerEngine, ActivityPriority};
 use runner_q::{ActivityHandler, ActivityContext, ActivityHandlerResult, ActivityError};
 use runner_q::config::WorkerConfig;
 use std::sync::Arc;
@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use tracing::info;
+use std::time::Duration;
 
 
 // Implement activity handler
@@ -44,30 +45,28 @@ pub struct Pong {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().init();
+ let mut engine = WorkerEngine::builder()
+     .redis_url("redis://localhost:6379")
+     .queue_name("my_app")
+     .max_workers(10)
+     .schedule_poll_interval(Duration::from_secs(30))
+     .build()
+     .await?;
 
-    // Create Redis connection pool
-    let redis_pool = bb8_redis::bb8::Pool::builder()
-        .build(bb8_redis::RedisConnectionManager::new("redis://127.0.0.1:6379")?)
-        .await?;
-
-    // Create worker engine
-    let config = WorkerConfig::default();
-    let mut worker_engine = WorkerEngine::new(redis_pool, config);
 
     // Register activity handler
-    worker_engine.register_activity("ping".to_string(), Arc::new(PingActivity));
+    engine.register_activity("ping".to_string(), Arc::new(PingActivity));
 
-    // Execute an activity with custom options
-    let future = worker_engine.execute_activity(
-        "ping".to_string(),
-        serde_json::to_value(Pong{operation_id: "0x1".into()}).unwrap(),
-        Some(ActivityOption {
-            priority: Some(ActivityPriority::High),
-            max_retries: 5,
-            timeout_seconds: 600, // 10 minutes
-            scheduled_at: None, // Execute immediately
-        })
-    ).await?;
+    let future = engine
+        .get_activity_executor()
+        .activity("ping")
+        .payload(serde_json::to_value(Pong{operation_id: "0x1".into()}).unwrap(),)
+        .priority(ActivityPriority::High)
+        .max_retries(5)
+        .timeout(Duration::from_secs(600))
+        .delay(Duration::from_secs(60))
+        .execute()
+        .await?;
 
     // Spawn a task to handle the result
     tokio::spawn(async move {
@@ -83,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Start the worker engine (this will run indefinitely)
-    worker_engine.start().await?;
+    engine.start().await?;
 
     Ok(())
 }
