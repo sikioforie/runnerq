@@ -255,6 +255,15 @@ impl ActivityQueue {
 
         Ok(())
     }
+
+    /// Remove activity from queue
+    async fn remove_activity() -> Result<(), WorkerError> {
+        
+        // // Remove from queue atomically
+        // let removed: i32 = conn.zrem(&queue_key, queue_entry).await?;
+        todo!();
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -366,6 +375,9 @@ impl ActivityQueueTrait for ActivityQueue {
         while start_time.elapsed() < timeout {
             // Try to pop highest priority item (highest score first)
             let result: Vec<String> = conn.zrevrange_withscores(&queue_key, 0, 0).await?;
+            info!("Result 1 => {result:?}");
+            let result: Vec<String> = conn.zrevrange_withscores(&queue_key, 0, 0).await?;
+            info!("Result 2 => {result:?}");
 
             if !result.is_empty() {
                 let queue_entry = &result[0];
