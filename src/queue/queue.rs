@@ -6,6 +6,7 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::{debug, error, info};
+use crate::is_acquired;
 
 /// Trait defining the interface for activity queue operations
 #[async_trait]
@@ -255,13 +256,22 @@ impl ActivityQueue {
 
         Ok(())
     }
+    
+    async fn remove_activity_from_queue(
+        &self,
+        activity: &Activity,
+    ) -> Result<(), WorkerError> {
+        let mut conn = self.redis_pool.get().await.map_err(|e| {
+            WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
+        })?;
 
-    /// Remove activity from queue
-    async fn remove_activity() -> Result<(), WorkerError> {
-        
-        // // Remove from queue atomically
-        // let removed: i32 = conn.zrem(&queue_key, queue_entry).await?;
-        todo!();
+        let _: () = conn
+            .zrem(
+                &activity.id.to_string(),
+                serde_json::to_string(&activity)?,
+            )
+            .await?;
+
         Ok(())
     }
 }
@@ -375,9 +385,11 @@ impl ActivityQueueTrait for ActivityQueue {
         while start_time.elapsed() < timeout {
             // Try to pop highest priority item (highest score first)
             let result: Vec<String> = conn.zrevrange_withscores(&queue_key, 0, 0).await?;
-            info!("Result 1 => {result:?}");
-            let result: Vec<String> = conn.zrevrange_withscores(&queue_key, 0, 0).await?;
-            info!("Result 2 => {result:?}");
+            if is_acquired(&queue_key)? {continue;}
+            // info!("RESULT => {result:?}");
+            // tokio::time::sleep(tokio::time::Duration::from_secs(1200)).await;
+
+            // TODO: Move activity to temporal worker storage
 
             if !result.is_empty() {
                 let queue_entry = &result[0];

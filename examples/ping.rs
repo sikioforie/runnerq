@@ -9,37 +9,6 @@ use tracing::info;
 use std::time::Duration;
 
 
-// Implement activity handler
-pub struct PingActivity;
-
-#[async_trait]
-impl ActivityHandler for PingActivity {
-    async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityHandlerResult {        
-        let input:PingInput = serde_json::from_value(payload)
-            .map_err(|_| ActivityError::NonRetry("Invalid payload format".to_string()))?;
-
-        Ok(Some(
-            serde_json::to_value(Pong{operation_id: input.operation_id})
-                .map_err(|_| ActivityError::NonRetry("Invalid pong format".to_string()))?
-        ))
-    }
-
-    fn activity_type(&self) -> String {
-        "ping".to_string()
-    }
-}
-
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PingInput {
-    operation_id: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Pong {
-    operation_id: String,
-}
-
 
 
 #[tokio::main]
@@ -64,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .priority(ActivityPriority::High)
         .max_retries(5)
         .timeout(Duration::from_secs(600))
-        .delay(Duration::from_secs(60))
+        // .delay(Duration::from_secs(1))
         .execute()
         .await?;
 
@@ -86,3 +55,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+// Implement activity handler
+pub struct PingActivity;
+
+#[async_trait]
+impl ActivityHandler for PingActivity {
+    async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityHandlerResult {        
+        let input:PingInput = serde_json::from_value(payload)
+            .map_err(|_| ActivityError::NonRetry("Invalid payload format".to_string()))?;
+
+        
+    tokio::spawn(async move {
+        let future = context
+            .activity_executor
+            .activity("ping")
+            .payload(serde_json::to_value(Pong{operation_id: "0x1".into()}).unwrap(),)
+            .priority(ActivityPriority::High)
+            .max_retries(5)
+            .timeout(Duration::from_secs(600))
+            // .delay(Duration::from_secs(1))
+            .execute()
+            .await.unwrap();
+            // tokio::time::sleep(tokio::time::Duration::from_secs(1200)).await;
+
+            
+                if let Ok(result) = future.get_result().await {
+                    match result {
+                        None => {}
+                        Some(data) => {
+                            let pong: Pong = serde_json::from_value(data).unwrap();
+                            info!("pong::{:?}", pong.operation_id);
+                        }
+                    }
+                }
+    });
+
+
+        Ok(Some(
+            serde_json::to_value(Pong{operation_id: input.operation_id})
+                .map_err(|_| ActivityError::NonRetry("Invalid pong format".to_string()))?
+        ))
+    }
+
+    fn activity_type(&self) -> String {
+        "ping".to_string()
+    }
+}
+
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PingInput {
+    operation_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Pong {
+    operation_id: String,
+}
+

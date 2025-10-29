@@ -203,6 +203,7 @@ pub mod config;
 pub mod queue;
 pub mod runner;
 pub mod worker;
+mod polled_activity;
 
 // Re-export main types for easy access
 pub use crate::config::WorkerConfig;
@@ -214,3 +215,4 @@ pub use activity::activity::{
     ActivityContext, ActivityFuture, ActivityHandler, ActivityHandlerResult, ActivityPriority,
 };
 pub use activity::error::{ActivityError, RetryableError};
+pub use polled_activity::*;
