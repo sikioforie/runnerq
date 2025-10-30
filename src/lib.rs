@@ -204,6 +204,7 @@ pub mod queue;
 pub mod runner;
 pub mod worker;
 pub mod network;
+pub mod execution_tracing;
 
 // Re-export main types for easy access
 pub use network::NetworkInfo;

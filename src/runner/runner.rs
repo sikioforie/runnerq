@@ -5,7 +5,7 @@ use crate::runner::error::WorkerError;
 use crate::runner::redis::{create_redis_pool, create_redis_pool_with_config, RedisConfig};
 use crate::{
     activity::activity::Activity, ActivityContext, ActivityError, ActivityHandler, ActivityQueue,
-    network
+    network,
 };
 use bb8_redis::bb8::Pool;
 use bb8_redis::RedisConnectionManager;
@@ -324,7 +324,6 @@ impl WorkerEngine {
 
         
         let network_info = network::get_engine_network_info().await?;
-
         info!(
             ip = network_info.ip.to_string(),
             max_concurrent_activities = self.config.max_concurrent_activities,
@@ -847,8 +846,11 @@ impl WorkerEngine {
     ///     }
     /// }
     /// ```
-    pub fn get_activity_executor(&self) -> Arc<dyn ActivityExecutor> {
-        Arc::new(WorkerEngineWrapper::new(self.activity_queue.clone()))
+    // pub fn get_activity_executor(&self) -> Arc<dyn ActivityExecutor> {
+    //     Arc::new(WorkerEngineWrapper::new(self.activity_queue.clone()))
+    // }
+    pub fn get_activity_executor2(&self) -> impl ActivityExecutor {
+        WorkerEngineWrapper::new(self.activity_queue.clone())
     }
 }
 
@@ -1030,8 +1032,8 @@ impl Default for WorkerEngineBuilder {
 /// # Ok(())
 /// # }
 /// ```
-pub struct ActivityBuilder<'a> {
-    engine: &'a WorkerEngineWrapper,
+pub struct ActivityBuilder {
+    engine: WorkerEngineWrapper,
     activity_type: String,
     payload: Option<serde_json::Value>,
     priority: Option<ActivityPriority>,
@@ -1040,9 +1042,9 @@ pub struct ActivityBuilder<'a> {
     delay: Option<Duration>,
 }
 
-impl<'a> ActivityBuilder<'a> {
+impl ActivityBuilder {
     /// Creates a new ActivityBuilder for the given engine and activity type.
-    pub fn new(engine: &'a WorkerEngineWrapper, activity_type: String) -> Self {
+    pub fn new(engine: WorkerEngineWrapper, activity_type: String) -> Self {
         Self {
             engine,
             activity_type,
@@ -1114,7 +1116,7 @@ impl<'a> ActivityBuilder<'a> {
     /// # Errors
     ///
     /// Returns `WorkerError` if the activity cannot be enqueued or if there are Redis connection issues.
-    pub async fn execute(self) -> Result<ActivityFuture, WorkerError> {
+    pub async fn execute(self) -> Result<ActivityFuture, WorkerError> {        
         let payload = self.payload.ok_or_else(|| {
             WorkerError::QueueError("Activity payload is required".to_string())
         })?;
@@ -1199,7 +1201,7 @@ pub trait ActivityExecutor: Send + Sync {
     /// # Ok(())
     /// # }
     /// ```
-    fn activity(&self, activity_type: &str) -> ActivityBuilder<'_>;
+    fn activity(self, activity_type: &str) -> ActivityBuilder;
 }
 
 /// Wrapper that provides activity execution capabilities to handlers.
@@ -1275,7 +1277,7 @@ impl ActivityExecutor for WorkerEngineWrapper {
     /// # Ok(())
     /// # }
     /// ```
-    fn activity(&self, activity_type: &str) -> ActivityBuilder<'_> {
+    fn activity(self, activity_type: &str) -> ActivityBuilder {
         ActivityBuilder::new(self, activity_type.to_string())
     }
 }

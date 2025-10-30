@@ -1,6 +1,6 @@
 static NETWORK_INFO: OnceLock<NetworkInfo> = OnceLock::new();
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NetworkInfo {
     pub ip: std::net::IpAddr
 }
