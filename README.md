@@ -258,18 +258,6 @@ Activity types in Runner-Q are simple strings that identify different types of a
 "background_sync"
 ```
 
-## Configuration
-
-```rust
-use runner_q::config::WorkerConfig;
-
-let config = WorkerConfig {
-    queue_name: "my_queue".to_string(),
-    max_concurrent_activities: 10,
-    redis_url: "redis://127.0.0.1:6379".to_string(),
-};
-```
-
 ## Custom Activity Handlers
 
 You can create custom activity handlers by implementing the `ActivityHandler` trait:
@@ -846,23 +834,6 @@ impl ResilientActivity {
 }
 ```
 
-## Configuration
-
-### WorkerConfig
-
-The `WorkerConfig` struct provides comprehensive configuration options:
-
-```rust
-use runner_q::WorkerConfig;
-
-let config = WorkerConfig {
-    queue_name: "my_app".to_string(),           // Redis key prefix
-    max_concurrent_activities: 10,              // Number of concurrent workers
-    redis_url: "redis://127.0.0.1:6379".to_string(), // Redis connection URL
-    schedule_poll_interval_seconds: Some(30),   // Scheduled activity poll interval
-};
-```
-
 ### Default Values
 
 When using the builder pattern, sensible defaults are provided:
@@ -876,17 +847,6 @@ use runner_q::WorkerEngine;
 // - max_workers: 10
 // - schedule_poll_interval: 5 seconds
 let engine = WorkerEngine::builder().build().await?;
-```
-
-### Environment Variables
-
-You can also configure the engine using environment variables:
-
-```bash
-export RUNNER_Q_REDIS_URL="redis://localhost:6379"
-export RUNNER_Q_QUEUE_NAME="my_app"
-export RUNNER_Q_MAX_WORKERS="20"
-export RUNNER_Q_SCHEDULE_POLL_INTERVAL="30"
 ```
 
 ### Redis Configuration
