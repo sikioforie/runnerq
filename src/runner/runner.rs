@@ -5,6 +5,7 @@ use crate::runner::error::WorkerError;
 use crate::runner::redis::{create_redis_pool, create_redis_pool_with_config, RedisConfig};
 use crate::{
     activity::activity::Activity, ActivityContext, ActivityError, ActivityHandler, ActivityQueue,
+    NetworkInfo
 };
 use bb8_redis::bb8::Pool;
 use bb8_redis::RedisConnectionManager;
@@ -14,6 +15,7 @@ use std::time::Duration;
 use tokio::sync::{watch, RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 use tokio_util::sync::CancellationToken;
+
 
 /// Optional metrics sink to expose counters without coupling to a specific backend.
 ///
@@ -128,6 +130,7 @@ pub struct WorkerEngine {
     shutdown_tx: watch::Sender<bool>,
     cancel_token: CancellationToken,
     metrics: Arc<dyn MetricsSink>,
+    network: NetworkInfo
 }
 
 impl WorkerEngine {
@@ -193,7 +196,7 @@ impl WorkerEngine {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(redis_pool: Pool<RedisConnectionManager>, config: WorkerConfig) -> Self {
+    pub fn new(redis_pool: Pool<RedisConnectionManager>, config: WorkerConfig, network: NetworkInfo) -> Self {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         Self {
             activity_queue: Arc::new(ActivityQueue::new(redis_pool, config.queue_name.clone())),
@@ -203,6 +206,7 @@ impl WorkerEngine {
             shutdown_tx,
             cancel_token: CancellationToken::new(),
             metrics: Arc::new(NoopMetrics),
+            network
         }
     }
 
@@ -321,6 +325,7 @@ impl WorkerEngine {
         }
 
         info!(
+            ip = self.network.ip.to_string(),
             max_concurrent_activities = self.config.max_concurrent_activities,
             "Starting worker engine"
         );
@@ -603,7 +608,7 @@ impl WorkerEngine {
                                     "failed_at": chrono::Utc::now().to_rfc3339()
                                 })),
                                 state: ResultState::Err,
-                            };
+                           };
                             if let Err(e) = aq.store_result(activity_id, activity_result).await {
                                 error!(activity_id = %activity_id, error = %e, "Failed to store activity result");
                             }
@@ -980,7 +985,12 @@ impl WorkerEngineBuilder {
             create_redis_pool(&config.redis_url).await?
         };
 
-        let mut worker_engine = WorkerEngine::new(redis_pool, config);
+
+        let mut worker_engine = WorkerEngine::new(
+            redis_pool,
+            config,
+            NetworkInfo::acquire().await? // Get network info
+        );
         
         // Apply custom metrics if provided
         if let Some(metrics) = self.metrics {

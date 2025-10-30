@@ -730,6 +730,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "toolbox",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -974,6 +975,11 @@ dependencies = [
  "pin-project-lite",
  "tokio",
 ]
+
+[[package]]
+name = "toolbox"
+version = "0.1.0"
+source = "git+https://github.com/sikioforie/toolbox.git#1ac84678960d48e39338740a2c72c3793a473f1f"
 
 [[package]]
 name = "tracing"

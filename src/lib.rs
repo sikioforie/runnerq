@@ -204,7 +204,10 @@ pub mod queue;
 pub mod runner;
 pub mod worker;
 
+mod network;
+
 // Re-export main types for easy access
+pub use network::NetworkInfo;
 pub use crate::config::WorkerConfig;
 pub use crate::queue::queue::{ActivityQueue, QueueStats};
 pub use crate::runner::error::WorkerError;
