@@ -203,8 +203,7 @@ pub mod config;
 pub mod queue;
 pub mod runner;
 pub mod worker;
-
-mod network;
+pub mod network;
 
 // Re-export main types for easy access
 pub use network::NetworkInfo;

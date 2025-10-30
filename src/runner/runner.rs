@@ -5,7 +5,7 @@ use crate::runner::error::WorkerError;
 use crate::runner::redis::{create_redis_pool, create_redis_pool_with_config, RedisConfig};
 use crate::{
     activity::activity::Activity, ActivityContext, ActivityError, ActivityHandler, ActivityQueue,
-    NetworkInfo
+    network
 };
 use bb8_redis::bb8::Pool;
 use bb8_redis::RedisConnectionManager;
@@ -130,7 +130,6 @@ pub struct WorkerEngine {
     shutdown_tx: watch::Sender<bool>,
     cancel_token: CancellationToken,
     metrics: Arc<dyn MetricsSink>,
-    network: NetworkInfo
 }
 
 impl WorkerEngine {
@@ -196,7 +195,7 @@ impl WorkerEngine {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(redis_pool: Pool<RedisConnectionManager>, config: WorkerConfig, network: NetworkInfo) -> Self {
+    pub fn new(redis_pool: Pool<RedisConnectionManager>, config: WorkerConfig) -> Self {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         Self {
             activity_queue: Arc::new(ActivityQueue::new(redis_pool, config.queue_name.clone())),
@@ -206,7 +205,6 @@ impl WorkerEngine {
             shutdown_tx,
             cancel_token: CancellationToken::new(),
             metrics: Arc::new(NoopMetrics),
-            network
         }
     }
 
@@ -324,8 +322,11 @@ impl WorkerEngine {
             *running = true;
         }
 
+        
+        let network_info = network::get_engine_network_info().await?;
+
         info!(
-            ip = self.network.ip.to_string(),
+            ip = network_info.ip.to_string(),
             max_concurrent_activities = self.config.max_concurrent_activities,
             "Starting worker engine"
         );
@@ -985,12 +986,10 @@ impl WorkerEngineBuilder {
             create_redis_pool(&config.redis_url).await?
         };
 
-
-        let mut worker_engine = WorkerEngine::new(
-            redis_pool,
-            config,
-            NetworkInfo::acquire().await? // Get network info
-        );
+        // Preload engine network info  
+        let _ = network::get_engine_network_info().await?;
+        
+        let mut worker_engine = WorkerEngine::new(redis_pool, config);
         
         // Apply custom metrics if provided
         if let Some(metrics) = self.metrics {
