@@ -991,15 +991,14 @@ mod tests {
         assert!(conn.is_ok(), "Failed to get connection pool");
         let mut conn = conn.unwrap();
         
-        let now = chrono::Utc::now();
-        println!("T => {now:?}\nTT => {:?}", now - chrono::Duration::seconds(2));
+        let now = chrono::Utc::now().timestamp() as isize;
 
         // Get activities that are ready to run
         let activity_jsons: Result<Vec<String>, redis::RedisError> = conn
-            .zrange_withscores(queue.get_scheduled_queue_key(), 0, now.timestamp() as isize)
+            .zrange_withscores(queue.get_scheduled_queue_key(), 0, now)
             .await;
-        println!("ZRANG => {activity_jsons:?}");
         assert!(activity_jsons.is_ok());
+
         let activity_jsons = activity_jsons.unwrap();
         assert!(activity_jsons.len() > 0, "No schedule activities");
 
