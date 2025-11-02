@@ -106,8 +106,12 @@ impl ActivityQueue {
     fn get_main_queue_key(&self) -> String {
         format!("{}:priority_queue", self.queue_name)
     }
+    
+    fn get_scheduled_queue_key(&self) -> String {
+        format!("{}:scheduled_queue", self.queue_name)
+    }
 
-    /// Compute a numeric score for the Redis sorted set that encodes priority and FIFO order.
+    /// Compute a numeric score for the Redis sorted set that encodes priorituy and FIFO order.
     ///
     /// The returned score is: `priority_weight + (created_at_microseconds % 1_000_000)`.
     /// Priority weights ensure higher-priority activities sort before lower ones when using
@@ -524,8 +528,6 @@ impl ActivityQueueTrait for ActivityQueue {
         })?;
 
         let activity_json = serde_json::to_string(&activity)?;
-        let scheduled_key = "scheduled_activities";
-
         let scheduled_at = activity
             .scheduled_at
             .unwrap_or_else(chrono::Utc::now)
@@ -533,7 +535,7 @@ impl ActivityQueueTrait for ActivityQueue {
 
         // Add to sorted set with timestamp as score
         let _: () = conn
-            .zadd(scheduled_key, activity_json, scheduled_at)
+            .zadd(self.get_scheduled_queue_key(), activity_json, scheduled_at)
             .await?;
 
         debug!(activity_id = %activity.id, scheduled_at = %scheduled_at, "Activity scheduled");
@@ -570,18 +572,18 @@ impl ActivityQueueTrait for ActivityQueue {
         })?;
 
         let now = chrono::Utc::now().timestamp();
-        let scheduled_key = "scheduled_activities";
+        let scheduled_key = self.get_scheduled_queue_key();
 
         // Get activities that are ready to run
         let activity_jsons: Vec<String> = conn
-            .zrangebyscore_limit(scheduled_key, 0, now, 0, 100)
+            .zrangebyscore_limit(&scheduled_key, 0, now, 0, 100)
             .await?;
 
         let mut ready_activities = Vec::new();
 
         for activity_json in activity_jsons {
             // Remove from scheduled set
-            let _: () = conn.zrem(scheduled_key, &activity_json).await?;
+            let _: () = conn.zrem(&scheduled_key, &activity_json).await?;
 
             // Parse and enqueue activity
             match serde_json::from_str::<Activity>(&activity_json) {
@@ -831,7 +833,6 @@ mod tests {
         test_activity_queue_mark_failed(&queue, &activity, true, &pool).await; // Retry
 
         // Scheduled Activity      
-        let scheduled_key = "queue_test_scheduled_activities";
         let activity = ActivityBuilder::new("ping".to_string())
         .payload(json!({"Pong": {"operation_id": "0x2"}}))
         .priority(ActivityPriority::High)
@@ -842,7 +843,7 @@ mod tests {
         assert!(activity.is_ok(), "Failed to create test activity");
         let activity = activity.unwrap();
         
-        test_activity_queue_schedule_activity(&queue, &scheduled_key, &activity, &pool).await;
+        test_activity_queue_schedule_activity(&queue, &activity, &pool).await;
         
 
 
@@ -970,7 +971,7 @@ mod tests {
     }
 
     
-    async fn test_activity_queue_schedule_activity(queue: &ActivityQueue, scheduled_key: &str, activity: &Activity, pool: &Pool<RedisConnectionManager> ) {
+    async fn test_activity_queue_schedule_activity(queue: &ActivityQueue, activity: &Activity, pool: &Pool<RedisConnectionManager> ) {
         assert!(activity.scheduled_at.is_some(), "Trying to schedule an activity with no scheduled duration");
 
         let timer = Timer::start();
@@ -990,12 +991,14 @@ mod tests {
         assert!(conn.is_ok(), "Failed to get connection pool");
         let mut conn = conn.unwrap();
         
-        let now = chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now();
+        println!("T => {now:?}\nTT => {:?}", now - chrono::Duration::seconds(2));
 
         // Get activities that are ready to run
         let activity_jsons: Result<Vec<String>, redis::RedisError> = conn
-            .zrangebyscore_limit(scheduled_key, 0, now, 0, 1)
+            .zrange_withscores(queue.get_scheduled_queue_key(), 0, now.timestamp() as isize)
             .await;
+        println!("ZRANG => {activity_jsons:?}");
         assert!(activity_jsons.is_ok());
         let activity_jsons = activity_jsons.unwrap();
         assert!(activity_jsons.len() > 0, "No schedule activities");
