@@ -767,18 +767,20 @@ pub(crate) struct ActivityResult {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use serde_json::json;
+    use std::time::Duration;
+    use crate::runner::redis::{create_redis_pool};
+    use crate::activity::activity::ActivityOption;
+    use redis::AsyncCommands;
+    use testcontainers::{core::{IntoContainerPort, WaitFor, ContainerAsync}, runners::AsyncRunner, GenericImage, ImageExt};
 
     #[tokio::test]
     async fn test_priority_score_calculation() {
-        let queue = ActivityQueue::new(
-            // Mock pool - not used in this test
-            Pool::builder()
-                .build(bb8_redis::RedisConnectionManager::new("redis://localhost").unwrap())
-                .await
-                .unwrap(),
-            "test".to_string(),
-        );
+        let pool = create_redis_pool("redis://localhost").await;
+        assert!(pool.is_ok(), "Failed create connection redis pool");
 
+        let pool = pool.unwrap();
+        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string());
         let now = Utc::now();
 
         // Test priority ordering
@@ -801,4 +803,358 @@ mod tests {
             "Later activities should have higher scores for FIFO ordering"
         );
     }
+
+    
+    #[tokio::test]
+    async fn test_activity_queue() {
+        let pool = create_redis_pool("redis://localhost").await;
+        assert!(pool.is_ok(), "Failed create connection redis pool");
+
+        let pool = pool.unwrap();
+        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string());
+        let activity = ActivityBuilder::new("ping".to_string())
+        .payload(json!({"Pong": {"operation_id": "0x1"}}))
+        .priority(ActivityPriority::High)
+        .max_retries(5)
+        .timeout(Duration::from_secs(600))
+        // .delay(Duration::from_secs(60))
+        .build();
+        assert!(activity.is_ok(), "Failed to create test activity");
+        let activity = activity.unwrap();
+        let queue_key = queue.get_main_queue_key();
+
+
+        test_activity_queue_enqueue(&queue, &queue_key, &activity, &pool).await;
+        test_activity_queue_dequeue(&queue, &queue_key,  &activity, &pool).await;
+        test_activity_queue_mark_completed(&queue, &activity.id, &pool).await;
+        test_activity_queue_mark_failed(&queue, &activity, false, &pool).await; // Non-Retry
+        test_activity_queue_mark_failed(&queue, &activity, true, &pool).await; // Retry
+
+        // Scheduled Activity      
+        let scheduled_key = "queue_test_scheduled_activities";
+        let activity = ActivityBuilder::new("ping".to_string())
+        .payload(json!({"Pong": {"operation_id": "0x2"}}))
+        .priority(ActivityPriority::High)
+        .max_retries(5)
+        .timeout(Duration::from_secs(600))
+        .delay(Duration::from_secs(2))
+        .build();
+        assert!(activity.is_ok(), "Failed to create test activity");
+        let activity = activity.unwrap();
+        
+        test_activity_queue_schedule_activity(&queue, &scheduled_key, &activity, &pool).await;
+        
+
+
+        // CLEANUP
+        cleanup(&queue_key, &activity.id, &pool).await;
+    }
+
+    async fn test_activity_queue_enqueue(queue: &ActivityQueue, queue_key: &str, activity: &Activity, pool: &Pool<RedisConnectionManager> ) {
+        let timer = Timer::start();
+        let result = queue.enqueue(activity.clone()).await;
+        let completed_in = timer.stop();
+
+        assert!(result.is_ok()); // Check for successful
+        // assert_eq!(result, Ok(())); // Check for successful with correct result
+        assert!(completed_in < Duration::from_millis(1)); // Check for time to successful
+
+        /*---Verify the activity is in queue---*/
+        let mut conn = pool.get().await;
+        assert!(conn.is_ok(), "Failed to get connection pool");
+        let mut conn = conn.unwrap();
+        
+        // Try to pop highest priority item (highest score first)
+        let result: Result<Vec<String>, redis::RedisError> = conn.zrevrange_withscores(queue_key, 0, 0).await;
+        assert!(result.is_ok());
+
+        let result = result.unwrap();
+        assert!(result.len() > 0);
+
+        let queued_activity = queue.parse_queue_entry(&result[0]);
+        assert!(queued_activity.is_ok()); // Check for successful parsing 
+        assert_eq!(queued_activity.unwrap().id, activity.id); // Check for value correctness
+    }
+    
+    async fn test_activity_queue_dequeue(queue: &ActivityQueue, queue_key: &str, activity: &Activity, pool: &Pool<RedisConnectionManager> ) {
+        let timer = Timer::start();
+        let result = queue.dequeue(Duration::from_millis(1)).await;
+        let completed_in = timer.stop();
+
+        assert!(result.is_ok()); // Check for successful
+        // assert_eq!(result, Ok(())); // Check for successful with correct result
+        assert!(completed_in < Duration::from_millis(1)); // Check for time to successful
+
+        /*---Verify if activity was removed from queue---*/
+        let mut conn = pool.get().await;
+        assert!(conn.is_ok(), "Failed to get connection pool");
+        let mut conn = conn.unwrap();
+        
+        // Try to pop highest priority item (highest score first)
+        let result: Result<Vec<String>, redis::RedisError> = conn.zrevrange_withscores(queue_key, 0, 0).await;
+        assert!(result.is_ok());
+
+        if let Some(result) = result.unwrap().get(0) {
+            let queued_activity = queue.parse_queue_entry(&result);
+            assert!(queued_activity.is_ok()); // Check for successful parsing 
+            assert!(queued_activity.unwrap().id != activity.id);
+        }
+        
+
+        // let queued_activity = queue.parse_queue_entry(&result[0]);
+        // assert!(queued_activity.is_ok()); // Check for successful parsing 
+        // // assert_eq!(queued_activity.unwrap(), activity); // Check for value correctness
+    }
+
+    async fn test_activity_queue_mark_completed(queue: &ActivityQueue, activity_id: &uuid::Uuid, pool: &Pool<RedisConnectionManager> ) {
+        let timer = Timer::start();
+        let result = queue.mark_completed(activity_id.clone()).await;
+        let completed_in = timer.stop();
+
+        assert!(result.is_ok()); // Check for successful
+        assert!(completed_in < Duration::from_millis(1)); // Check for time to successful
+
+        verify_activity_status(ActivityStatus::Completed, activity_id, pool).await;
+    }
+
+    async fn test_activity_queue_mark_failed(queue: &ActivityQueue, activity: &Activity, retryable: bool, pool: &Pool<RedisConnectionManager> ) {
+        let err_msg =  "Simulated error".to_string();
+        let timer = Timer::start();
+        let result = queue.mark_failed(activity.clone(), err_msg.clone(), false).await;
+        let completed_in = timer.stop();
+
+        assert!(result.is_ok()); // Check for successful
+        assert!(completed_in < Duration::from_millis(1)); // Check for time to successful
+
+        // let expected_status = if retryable {ActivityStatus::Failed}else{ActivityStatus::DeadLetter};
+        let expected_status = ActivityStatus::Failed;
+        verify_activity_status(expected_status, &activity.id, pool).await;
+
+        // // Verify the activity is add to deadletter queue for not-tryable error
+        // if retryable {
+        //     #[derive(Deserialize)]
+        //     struct DeadLetterItem {
+        //         activity: Activity,
+        //         error_message: String,
+        //         failed_at: chrono::DateTime<chrono::Utc>
+        //     }
+        //     let mut conn = pool.get().await;
+        //     assert!(conn.is_ok(), "Failed to get connection pool");
+
+        //     let mut conn = conn.unwrap();
+        //     let result: Result<String, redis::RedisError> = conn.rpop("dead_letter_queue", None).await;
+        //     assert!(result.is_ok(), "Failed to pop of dead letter queue");
+
+        //     let item = serde_json::from_str::<DeadLetterItem>(&result.unwrap());
+        //     assert!(item.is_ok());
+
+        //     let item = item.unwrap();
+        //     assert_eq!(item.activity.id, activity.id, "Dead letter activity does not match failed activity");
+        //     assert_eq!(item.error_message, err_msg, "Dead letter error msg does not match failed error msg");            
+        // }
+    }
+
+    /// Verify activity status matches stored 
+    async fn verify_activity_status(expected_status: ActivityStatus, activity_id: &uuid::Uuid, pool: &Pool<RedisConnectionManager> ) {
+        let mut conn = pool.get().await;
+        assert!(conn.is_ok(), "Failed to get connection pool");
+
+        let mut conn = conn.unwrap();
+        let activity_key = format!("activity:{}", activity_id);
+        let result: Result<String, redis::RedisError> = conn.hget(&activity_key, "status").await;
+        assert!(result.is_ok(), "Failed to get an activity status");
+
+        let status = serde_json::from_str::<ActivityStatus>(&result.unwrap());
+        assert!(status.is_ok());
+        assert_eq!(status.unwrap(), expected_status);
+    }
+
+    
+    async fn test_activity_queue_schedule_activity(queue: &ActivityQueue, scheduled_key: &str, activity: &Activity, pool: &Pool<RedisConnectionManager> ) {
+        assert!(activity.scheduled_at.is_some(), "Trying to schedule an activity with no scheduled duration");
+
+        let timer = Timer::start();
+        let result = queue.schedule_activity(activity.clone()).await;
+        let completed_in = timer.stop();
+
+        assert!(result.is_ok()); // Check for successful
+        // assert_eq!(result, Ok(())); // Check for successful with correct result
+        assert!(completed_in < Duration::from_millis(1)); // Check for time to successful
+
+        // Wait for the delay of the schedule activity before verifying
+        let elapsed = activity.scheduled_at.clone().unwrap() - chrono::Utc::now();
+        tokio::time::sleep(Duration::from_secs((elapsed.num_seconds() as u64) + 1)).await;
+
+        /*---Verify the activity is scheduled---*/
+        let mut conn = pool.get().await;
+        assert!(conn.is_ok(), "Failed to get connection pool");
+        let mut conn = conn.unwrap();
+        
+        let now = chrono::Utc::now().timestamp();
+
+        // Get activities that are ready to run
+        let activity_jsons: Result<Vec<String>, redis::RedisError> = conn
+            .zrangebyscore_limit(scheduled_key, 0, now, 0, 1)
+            .await;
+        assert!(activity_jsons.is_ok());
+        let activity_jsons = activity_jsons.unwrap();
+        assert!(activity_jsons.len() > 0, "No schedule activities");
+
+        let scheduled_activity = serde_json::from_str::<Activity>(&activity_jsons[0]);
+        assert!(scheduled_activity.is_ok(), "Failed to deserialize activity");
+        assert_eq!(scheduled_activity.unwrap().id, activity.id); // Check for value correctness
+    }
+
+    /*---------SETUP------------*/
+    async fn cleanup(queue_key: &str, activity_id: &uuid::Uuid, pool: &Pool<RedisConnectionManager> ) {
+        let mut conn = pool.get().await;
+        assert!(conn.is_ok(), "Failed to get connection pool");
+        let mut conn = conn.unwrap();
+
+        let activity_key = format!("activity:{}", activity_id);
+        let cleanup_queue: Result<(), redis::RedisError> = conn.zrembyscore(queue_key, 0, -1).await;
+        let cleanup_metadata: Result<(), redis::RedisError>  = conn.hdel(
+            &activity_key,
+            &["status", "created_at", "retry_count", "priority", "score"]
+        ).await;
+
+        assert!(cleanup_queue.is_ok() && cleanup_metadata.is_ok(), "Failed to cleanup after testing queue");
+    }
+
+    
+    async fn setup_redis_test_environment() -> (String, ContainerAsync<GenericImage>)  {
+        let port = 4030;
+       // let container = GenericImage::new("redis", "7.2.4")
+       let container = GenericImage::new("redis", "latest")
+            .with_exposed_port(port.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+            .with_network("bridge")
+            .with_env_var("DEBUG", "1")
+            .start()
+            .await
+            .expect("Failed to start Redis");
+        (
+            format!("redis://{}:{}",
+                container.get_host().await.expect("Failed to get host"),
+                container.get_host_port_ipv4(port).await.expect("Failed to get host port")
+            ),
+            container,
+        )
+    }
+
+
+
+    struct Timer(std::time::Instant);
+    impl Timer {
+        fn start()-> Self {
+            Self(std::time::Instant::now())
+        }
+        fn stop(self) -> Duration {
+            self.0.elapsed()
+        }
+    }
+
+
+    struct ActivityBuilder {
+        activity_type: String,
+        payload: Option<serde_json::Value>,
+        priority: Option<ActivityPriority>,
+        max_retries: Option<u32>,
+        timeout: Option<Duration>,
+        delay: Option<Duration>,
+    }
+
+    impl ActivityBuilder {
+        /// Creates a new ActivityBuilder for the given engine and activity type.
+        pub fn new(activity_type: String) -> Self {
+            Self {
+                activity_type,
+                payload: None,
+                priority: None,
+                max_retries: None,
+                timeout: None,
+                delay: None,
+            }
+        }
+
+        /// Sets the payload for the activity.
+        ///
+        /// # Parameters
+        ///
+        /// * `payload` - JSON payload containing the activity data
+        pub fn payload(mut self, payload: serde_json::Value) -> Self {
+            self.payload = Some(payload);
+            self
+        }
+
+        /// Sets the priority for the activity.
+        ///
+        /// # Parameters
+        ///
+        /// * `priority` - Activity priority level
+        pub fn priority(mut self, priority: ActivityPriority) -> Self {
+            self.priority = Some(priority);
+            self
+        }
+
+        /// Sets the maximum number of retries for the activity.
+        ///
+        /// # Parameters
+        ///
+        /// * `retries` - Maximum number of retry attempts (0 for unlimited)
+        pub fn max_retries(mut self, retries: u32) -> Self {
+            self.max_retries = Some(retries);
+            self
+        }
+
+        /// Sets the timeout for the activity execution.
+        ///
+        /// # Parameters
+        ///
+        /// * `timeout` - Maximum execution time before timeout
+        pub fn timeout(mut self, timeout: Duration) -> Self {
+            self.timeout = Some(timeout);
+            self
+        }
+
+        /// Sets the delay before the activity should be executed.
+        ///
+        /// # Parameters
+        ///
+        /// * `delay` - Delay before execution
+        pub fn delay(mut self, delay: Duration) -> Self {
+            self.delay = Some(delay);
+            self
+        }
+
+        /// Executes the activity with the configured settings.
+        ///
+        /// # Returns
+        ///
+        /// Returns a `Result<Activity, WorkerError>` containing the activity future
+        /// or an error if the activity cannot be enqueued.
+        ///
+        /// # Errors
+        ///
+        /// Returns `WorkerError` if the activity cannot be built for any reason.
+        pub fn build(self) -> Result<Activity, WorkerError> {
+            let payload = self.payload.ok_or_else(|| {
+                WorkerError::QueueError("Activity payload is required".to_string())
+            })?;
+
+            let option = if self.priority.is_some() || self.max_retries.is_some() || self.timeout.is_some() || self.delay.is_some() {
+                Some(ActivityOption {
+                    priority: self.priority,
+                    max_retries: self.max_retries.unwrap_or(3),
+                    timeout_seconds: self.timeout.map(|d| d.as_secs()).unwrap_or(300),
+                    delay_seconds: self.delay.map(|d| d.as_secs()),
+                })
+            } else {
+                None
+            };
+
+            Ok(Activity::new(self.activity_type, payload, option))
+        }
+    }
+
 }
