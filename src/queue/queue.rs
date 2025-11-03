@@ -1073,7 +1073,7 @@ mod tests {
     #[tokio::test]
     async fn test_activity_queue_enqueue() -> TestResult  {
         let (pool, container) = setup_redis_test_environment().await;
-        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string());
+        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string(), 60_000);
         let activity = ActivityBuilder::new("ping".to_string())
         .payload(json!({"Pong": {"operation_id": "0x1"}}))
         .priority(ActivityPriority::High)
@@ -1106,7 +1106,7 @@ mod tests {
     #[tokio::test]
     async fn test_activity_queue_dequeue( )-> TestResult  {
         let (pool, container) = setup_redis_test_environment().await;
-        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string());
+        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string(), 60_000);
         let activity = ActivityBuilder::new("ping".to_string())
         .payload(json!({"Pong": {"operation_id": "0x1"}}))
         .priority(ActivityPriority::High)
@@ -1140,7 +1140,7 @@ mod tests {
     #[tokio::test]
     async fn test_activity_queue_mark_completed() -> TestResult {
         let (pool, container) = setup_redis_test_environment().await;
-        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string());
+        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string(), 60_000);
         let activity = ActivityBuilder::new("ping".to_string())
         .payload(json!({"Pong": {"operation_id": "0x1"}}))
         .priority(ActivityPriority::High)
@@ -1164,7 +1164,7 @@ mod tests {
     #[tokio::test]
     async fn test_activity_queue_mark_failed()->TestResult {
         let (pool, container) = setup_redis_test_environment().await;
-        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string());
+        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string(), 60_000);
         let activity = ActivityBuilder::new("ping".to_string())
         .payload(json!({"Pong": {"operation_id": "0x1"}}))
         .priority(ActivityPriority::High)
@@ -1227,7 +1227,7 @@ mod tests {
     #[tokio::test]
     async fn test_activity_queue_schedule_activity() -> TestResult {
         let (pool, container) = setup_redis_test_environment().await;
-        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string());
+        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string(), 60_000);
         let activity = ActivityBuilder::new("ping".to_string())
         .payload(json!({"Pong": {"operation_id": "0x1"}}))
         .priority(ActivityPriority::High)
@@ -1269,7 +1269,7 @@ mod tests {
     #[tokio::test]
     async fn test_activity_queue_process_schedule_activities() -> TestResult {
         let (pool, container) = setup_redis_test_environment().await;
-        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string());
+        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string(), 60_000);
         let mut scheduled_activities:Vec<uuid::Uuid> = Vec::with_capacity(4);
 
         // Enqueue test activities
@@ -1332,7 +1332,7 @@ mod tests {
     #[tokio::test]
     async fn test_activity_queue_store_result() -> TestResult {
         let (pool, container) = setup_redis_test_environment().await;
-        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string());
+        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string(), 60_000);
         let activity_id = uuid::Uuid::new_v4();
         let activity_result = ActivityResult {
             data: Some(json!({"Pong":  {"operation_id": "0x1"}})),
@@ -1366,7 +1366,7 @@ mod tests {
     #[tokio::test]
     async fn test_activity_queue_get_result() -> TestResult {
         let (pool, container) = setup_redis_test_environment().await;
-        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string());
+        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string(), 60_000);
         let activity_id = uuid::Uuid::new_v4();
         let activity_result = ActivityResult {
             data: Some(json!({"Pong":  {"operation_id": "0x1"}})),
