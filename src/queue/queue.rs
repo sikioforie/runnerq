@@ -1034,6 +1034,7 @@ mod tests {
 
         assert_eq!(result.len(), scheduled_activities.len(), "Did not match lenght of scheduled items"); // Check for successful
         assert!(completed_in < Duration::from_millis(1)); // Check for time to successful
+        for activity in result { assert!(scheduled_activities.iter().any(|x| x == &activity.id)) } // Verifying processed activities was the actual scheduled activities
         
 
         // /*---Verify the activity is scheduled---*/
