@@ -205,6 +205,9 @@ pub mod runner;
 pub mod worker;
 pub mod network;
 
+#[cfg(test)]
+pub mod test_suite;
+
 // Re-export main types for easy access
 pub use network::NetworkInfo;
 pub use crate::config::WorkerConfig;

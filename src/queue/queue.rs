@@ -753,13 +753,13 @@ pub struct QueueStats {
     pub dead_letter_activities: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub(crate) enum ResultState {
     Ok,
     Err,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct ActivityResult {
     pub data: Option<serde_json::Value>,
     pub state: ResultState,
@@ -774,9 +774,8 @@ mod tests {
     use crate::runner::redis::{create_redis_pool};
     use crate::activity::activity::ActivityOption;
     use redis::AsyncCommands;
-    use testcontainers::{core::{IntoContainerPort, WaitFor, ContainerAsync}, runners::AsyncRunner, GenericImage, ImageExt};
+    use crate::test_suite::{TestResult, ActivityBuilder, Timer, setup_redis_test_environment};
 
-    type TestResult = Result<(), Box<dyn std::error::Error + 'static>>;
     
     #[tokio::test]
     async fn test_priority_score_calculation() {
@@ -806,57 +805,6 @@ mod tests {
 
         
         container.stop().await.expect("Failed to stop container");
-    }
-
-    
-    #[tokio::test]
-    async fn test_activity_queue() {
-        // let (redis_url, container) = setup_redis_test_environment().await;
-        // let pool = create_redis_pool(&redis_url).await;
-        // assert!(pool.is_ok(), "Failed create connection redis pool");
-
-        // tokio::time::sleep(tokio::time::Duration::from_secs(1000)).await;
-
-        // let mut activity_ids_to_be_cleaned:Vec<uuid::Uuid>  = Vec::new();
-        // let pool = pool.unwrap();
-        // let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string());
-        // let activity = ActivityBuilder::new("ping".to_string())
-        // .payload(json!({"Pong": {"operation_id": "0x1"}}))
-        // .priority(ActivityPriority::High)
-        // .max_retries(5)
-        // .timeout(Duration::from_secs(600))
-        // // .delay(Duration::from_secs(60))
-        // .build();
-        // assert!(activity.is_ok(), "Failed to create test activity");
-        // let activity = activity.unwrap();
-        // let queue_key = queue.get_main_queue_key();
-
-
-        // // test_activity_queue_enqueue(&queue, &queue_key, &activity, &pool).await;
-        // // test_activity_queue_dequeue(&queue, &queue_key,  &activity, &pool).await;
-        // // test_activity_queue_mark_completed(&queue, &activity.id, &pool).await;
-        // // test_activity_queue_mark_failed(&queue, &activity, false, &pool).await; // Non-Retry
-        // // test_activity_queue_mark_failed(&queue, &activity, true, &pool).await; // Retry
-        // // activity_ids_to_be_cleaned.push(activity.id);
-        // // cleanup(&queue, &activity_ids_to_be_cleaned, &pool).await; // CLEANUP
-
-        // // Scheduled Activity      
-        // let activity = ActivityBuilder::new("ping".to_string())
-        // .payload(json!({"Pong": {"operation_id": "0x2"}}))
-        // .priority(ActivityPriority::High)
-        // .max_retries(5)
-        // .timeout(Duration::from_secs(600))
-        // .delay(Duration::from_secs(2))
-        // .build();
-        // assert!(activity.is_ok(), "Failed to create test activity");
-        // let activity = activity.unwrap();
-        
-        // test_activity_queue_schedule_activity(&queue, &activity, &pool).await;
-        // activity_ids_to_be_cleaned.push(activity.id);
-        // cleanup(&queue, &activity_ids_to_be_cleaned, &pool).await; // CLEANUP
-        
-        // // activity_ids_to_be_cleaned = test_activity_queue_process_schedule_activities(&queue, &pool).await;
-        // // cleanup(&queue, &activity_ids_to_be_cleaned, &pool).await; // CLEANUP
     }
 
     #[tokio::test]
@@ -1022,6 +970,7 @@ mod tests {
         .priority(ActivityPriority::High)
         .max_retries(5)
         .timeout(Duration::from_secs(600))
+        .delay(Duration::from_secs(2))
         .build()?;
 
         let queue_key = queue.get_main_queue_key();
@@ -1042,7 +991,7 @@ mod tests {
 
         // Get activities that are ready to run
         let activity_jsons: Vec<String> = conn
-            .zrange_withscores(queue.get_scheduled_queue_key(), 0, now)
+            .zrangebyscore_limit(&queue.get_scheduled_queue_key(), 0, now, 0, 1)
             .await?;
         assert!(activity_jsons.len() > 0, "No schedule activities");
 
@@ -1075,17 +1024,17 @@ mod tests {
             let result = queue.enqueue(activity).await;
             assert!(result.is_ok(), "Failed to schedule `ping {i}`");
         }
+      
+        // Wait for the delay of the last scheduled activity before verifying
+        tokio::time::sleep(Duration::from_secs(scheduled_activities.len() as u64)).await;
 
-        // let timer = Timer::start();
-        // let result = queue.schedule_activity(activity.clone()).await;
-        // let completed_in = timer.stop();
+        let timer = Timer::start();
+        let result = queue.process_scheduled_activities().await?;
+        let completed_in = timer.stop();
 
-        // assert!(result.is_ok()); // Check for successful
-        // // assert_eq!(result, Ok(())); // Check for successful with correct result
-        // assert!(completed_in < Duration::from_millis(1)); // Check for time to successful
-
-        // // Wait for the delay of the last scheduled activity before verifying
-        // tokio::time::sleep(Duration::from_secs(scheduled_activities.capacity()).await;
+        assert_eq!(result.len(), scheduled_activities.len(), "Did not match lenght of scheduled items"); // Check for successful
+        assert!(completed_in < Duration::from_millis(1)); // Check for time to successful
+        
 
         // /*---Verify the activity is scheduled---*/
         // let mut conn = pool.get().await;
@@ -1111,159 +1060,73 @@ mod tests {
         Ok(())
     }
 
-    /*---------SETUP------------*/
-    async fn cleanup(queue: &ActivityQueue, activity_ids: &Vec<uuid::Uuid>, pool: &Pool<RedisConnectionManager> ) {
-        let mut conn = pool.get().await;
-        assert!(conn.is_ok(), "Failed to get connection pool");
-        let mut conn = conn.unwrap();
+    #[tokio::test]
+    async fn test_activity_queue_get_stats() -> TestResult {
+        todo!()
+    }
+
+    #[tokio::test]
+    async fn test_activity_queue_store_result() -> TestResult {
+        let (pool, container) = setup_redis_test_environment().await;
+        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string());
+        let activity_id = uuid::Uuid::new_v4();
+        let activity_result = ActivityResult {
+            data: Some(json!({"Pong":  {"operation_id": "0x1"}})),
+            state: ResultState::Ok,
+        };
+      
+
+        let timer = Timer::start();
+        let result = queue.store_result(activity_id.clone(), activity_result.clone()).await;
+        let completed_in = timer.stop();
+
+        assert!(result.is_ok(), "Failed to store result"); // Check for successful
+        assert!(completed_in < Duration::from_millis(1)); // Check for time to successful
         
-        let cleanup_queue: Result<(), redis::RedisError> = conn.zrembyscore(queue.get_main_queue_key(), 0, -1).await;
-        assert!(cleanup_queue.is_ok(), "Failed to cleanup after testing queue");
 
-        let cleanup_scheduled_queue: Result<(), redis::RedisError> = conn.zrembyscore(queue.get_scheduled_queue_key(), 0, -1).await;
-        assert!(cleanup_scheduled_queue.is_ok(), "Failed to cleanup after testing queue");
+        /*---Verify the activity is scheduled---*/
+        let mut conn = pool.get().await?;
+        let result_key = format!("result:{}", activity_id);
+        let result_json: Option<String> = conn.get(&result_key).await?;
 
-        for id in activity_ids {
-            let cleanup_metadata: Result<(), redis::RedisError>  = conn.hdel(
-                format!("activity:{}", id),
-                &["status", "created_at", "retry_count", "priority", "score"]
-            ).await;
-            assert!(cleanup_metadata.is_ok(), "Failed to cleanup after testing queue");
-        }
-    }
-
-    
-    async fn setup_redis_test_environment() -> (Pool<RedisConnectionManager>, ContainerAsync<GenericImage>)  {
-       let container = GenericImage::new("redis", "alpine3.22")
-            .with_exposed_port(6379.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .with_network("bridge")
-            .with_env_var("DEBUG", "1")
-            .start()
-            .await
-            .expect("Failed to start Redis");
+        assert!(result_json.is_some(), "Result not found");
         
-        let host = container.get_host().await.expect("Failed to get host");
-        let host_port = container.get_host_port_ipv4(6379).await.expect("Failed to get host port");
-        let pool = create_redis_pool(&format!("redis://{host}:{host_port}")).await;
-        assert!(pool.is_ok(), "Failed create connection redis pool");
+        let stored_activity_result: ActivityResult  = serde_json::from_str(&result_json.unwrap())?;
+        assert_eq!(stored_activity_result.state, activity_result.state, "Activity result state does not match");
+        assert_eq!(stored_activity_result.data, activity_result.data, "Activity result data does not match");
 
-        (pool.unwrap(), container)
+        container.stop().await.expect("Failed to stop container");
+        Ok(())
     }
 
+    #[tokio::test]
+    async fn test_activity_queue_get_result() -> TestResult {
+        let (pool, container) = setup_redis_test_environment().await;
+        let queue = ActivityQueue::new(pool.clone(), "queue_test_activity_queue".to_string());
+        let activity_id = uuid::Uuid::new_v4();
+        let activity_result = ActivityResult {
+            data: Some(json!({"Pong":  {"operation_id": "0x1"}})),
+            state: ResultState::Ok,
+        };
 
 
-    struct Timer(std::time::Instant);
-    impl Timer {
-        fn start()-> Self {
-            Self(std::time::Instant::now())
-        }
-        fn stop(self) -> Duration {
-            self.0.elapsed()
-        }
-    }
+        // Store result
+        queue.store_result(activity_id.clone(), activity_result.clone()).await?;
+      
+        let timer = Timer::start();
+        let result = queue.get_result(activity_id.clone()).await?;
+        let completed_in = timer.stop();
 
+        assert!(result.is_none(), "Result was not found"); // Check for successful
+        assert!(completed_in < Duration::from_millis(1)); // Check for time to successful
 
-    struct ActivityBuilder {
-        activity_type: String,
-        payload: Option<serde_json::Value>,
-        priority: Option<ActivityPriority>,
-        max_retries: Option<u32>,
-        timeout: Option<Duration>,
-        delay: Option<Duration>,
-    }
+        
+        let found_result = result.unwrap();
+        assert_eq!(found_result.state, activity_result.state, "Activity result state does not match");
+        assert_eq!(found_result.data, activity_result.data, "Activity result data does not match");
 
-    impl ActivityBuilder {
-        /// Creates a new ActivityBuilder for the given engine and activity type.
-        pub fn new(activity_type: String) -> Self {
-            Self {
-                activity_type,
-                payload: None,
-                priority: None,
-                max_retries: None,
-                timeout: None,
-                delay: None,
-            }
-        }
-
-        /// Sets the payload for the activity.
-        ///
-        /// # Parameters
-        ///
-        /// * `payload` - JSON payload containing the activity data
-        pub fn payload(mut self, payload: serde_json::Value) -> Self {
-            self.payload = Some(payload);
-            self
-        }
-
-        /// Sets the priority for the activity.
-        ///
-        /// # Parameters
-        ///
-        /// * `priority` - Activity priority level
-        pub fn priority(mut self, priority: ActivityPriority) -> Self {
-            self.priority = Some(priority);
-            self
-        }
-
-        /// Sets the maximum number of retries for the activity.
-        ///
-        /// # Parameters
-        ///
-        /// * `retries` - Maximum number of retry attempts (0 for unlimited)
-        pub fn max_retries(mut self, retries: u32) -> Self {
-            self.max_retries = Some(retries);
-            self
-        }
-
-        /// Sets the timeout for the activity execution.
-        ///
-        /// # Parameters
-        ///
-        /// * `timeout` - Maximum execution time before timeout
-        pub fn timeout(mut self, timeout: Duration) -> Self {
-            self.timeout = Some(timeout);
-            self
-        }
-
-        /// Sets the delay before the activity should be executed.
-        ///
-        /// # Parameters
-        ///
-        /// * `delay` - Delay before execution
-        pub fn delay(mut self, delay: Duration) -> Self {
-            self.delay = Some(delay);
-            self
-        }
-
-        /// Executes the activity with the configured settings.
-        ///
-        /// # Returns
-        ///
-        /// Returns a `Result<Activity, WorkerError>` containing the activity future
-        /// or an error if the activity cannot be enqueued.
-        ///
-        /// # Errors
-        ///
-        /// Returns `WorkerError` if the activity cannot be built for any reason.
-        pub fn build(self) -> Result<Activity, WorkerError> {
-            let payload = self.payload.ok_or_else(|| {
-                WorkerError::QueueError("Activity payload is required".to_string())
-            })?;
-
-            let option = if self.priority.is_some() || self.max_retries.is_some() || self.timeout.is_some() || self.delay.is_some() {
-                Some(ActivityOption {
-                    priority: self.priority,
-                    max_retries: self.max_retries.unwrap_or(3),
-                    timeout_seconds: self.timeout.map(|d| d.as_secs()).unwrap_or(300),
-                    delay_seconds: self.delay.map(|d| d.as_secs()),
-                })
-            } else {
-                None
-            };
-
-            Ok(Activity::new(self.activity_type, payload, option))
-        }
+        container.stop().await.expect("Failed to stop container");
+        Ok(())
     }
 
 }
